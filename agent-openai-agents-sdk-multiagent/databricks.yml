@@ -29,32 +29,24 @@ resources:
             experiment_id: "2932940041946641"
             permission: 'CAN_MANAGE'
 
-        # Vector Search index for SEC filing RAG
-        - name: 'sec_vector_index'
-          uc_securable:
-            securable_full_name: 'hackathon_521302447211702.default.embedding_vsi'
-            securable_type: 'TABLE'
-            permission: 'SELECT'
-
-        # Embedding model endpoint for vector search queries
-        - name: 'embedding_endpoint'
-          serving_endpoint:
-            name: 'databricks-bge-large-en'
-            permission: 'CAN_QUERY'
-
-        # Vector search endpoint
-        - name: 'sec_endpoint'
-          serving_endpoint:
-            name: 'sec_endpoint'
-            permission: 'CAN_QUERY'
+        # NOTE: Vector search index, embedding endpoint, and search endpoint
+        # permissions are managed at the workspace level for the hackathon.
+        # If you get permission errors at runtime, manually grant the app's
+        # service principal access to these resources.
 
 targets:
   dev:
     mode: development
     default: true
+    workspace:
+      host: https://dbc-7c699d6a-b2cd.cloud.databricks.com
+      profile: hackathon_ws
 
   prod:
     mode: production
+    workspace:
+      host: https://dbc-7c699d6a-b2cd.cloud.databricks.com
+      profile: hackathon_ws
     resources:
       apps:
         agent_openai_agents_sdk_multiagent:

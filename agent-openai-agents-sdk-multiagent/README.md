@@ -1,270 +1,362 @@
-# Multi-Agent Orchestrator
+# SEC Filing Attribute Extraction Agent
 
-> **Configuration Required** — This template is **not** ready to run out of the box.
-> You must replace placeholder values before running. See [Configuration](#configuration) below.
+Multi-agent SEC filing attribute extraction built with **LangChain** and **LangGraph**, served via **MLflow Responses API** on **Databricks Apps**, with a **Streamlit** UI.
 
-This template demonstrates a multi-agent orchestrator that queries multiple backends from a single Databricks App:
+Extracts 16 structured business attributes from raw SEC filings using a pipeline of specialised agents: regex scraping, vector search retrieval, LLM extraction, rule-based enrichment, self-evaluation, and web fallback.
 
-| Backend | How it's queried | API used |
-|---------|-----------------|----------|
-| Another agent deployed as a **Databricks App** | `DatabricksOpenAI.responses.create(model="apps/<name>")` | Responses API |
-| A **Genie space** for structured data | Built-in Databricks MCP server | MCP |
-| A **knowledge-assistant** on Model Serving | `DatabricksOpenAI.responses.create(model="<endpoint>")` | Responses API |
-| A **model** on Model Serving | `DatabricksOpenAI.responses.create(model="<endpoint>")` | Responses API |
+---
 
-The orchestrator agent decides which tool/backend to use based on the user's question.
+## Repository Location
 
-## Configuration
+This project lives inside a larger monorepo. The root of **this** agent is:
 
-Before running, you **must** replace these placeholders in `agent_server/agent.py`:
+```
+app-templates/
+└── agent-openai-agents-sdk-multiagent/   ← YOU ARE HERE
+```
 
-| Placeholder | Where | Description |
-|-------------|-------|-------------|
-| `<YOUR-GENIE-SPACE-ID>` | `GENIE_SPACE_ID` | UUID of your Genie space (from the Genie URL) |
-| `<YOUR-APP-AGENT-NAME>` | `SUBAGENTS[0]["endpoint"]` | Name of another agent deployed as a Databricks App |
-| `<YOUR-KNOWLEDGE-ASSISTANT-ENDPOINT>` | `SUBAGENTS[1]["endpoint"]` | Serving endpoint name (flat name like `my-ka-endpoint`, NOT a Vector Search index) |
-| `<YOUR-SERVING-ENDPOINT>` | `SUBAGENTS[2]["endpoint"]` | Serving endpoint name for another agent or model |
+All commands below should be run from this directory:
 
-You must also update the matching placeholders in `databricks.yml` to grant the app permission to access these resources.
+```bash
+cd agent-openai-agents-sdk-multiagent
+```
 
-To add or remove subagents, edit the `SUBAGENTS` list — each entry automatically becomes a separate tool for the orchestrator. After editing subagents, **update the orchestrator's instructions** in `create_orchestrator_agent()` to describe your specific tools and when each should be used. The more specific the instructions, the more accurately the agent will route requests.
+---
 
-> **Important:** The serving endpoint tools use the **Responses API** exclusively. Your endpoints must appear as **"Agent (Responses)"** in the Task column on the Serving UI in Databricks. Endpoints that only support the Chat Completions API ("LLM" task type) will not work with this template as-is.
+## Project Structure
 
-> **Tip:** Search for `TODO:` across the project to find all values that need configuration.
+```
+agent-openai-agents-sdk-multiagent/
+│
+├── agent_server/                    # Backend — agent logic + server
+│   ├── agent.py                     # MLflow Responses API wrapper (invoke/stream)
+│   ├── start_server.py              # FastAPI + MLflow AgentServer bootstrap
+│   ├── utils.py                     # Databricks auth helpers (OBO, workspace client)
+│   ├── evaluate_agent.py            # Evaluation harness (MLflow scorers)
+│   │
+│   └── sec_extraction/              # LangChain/LangGraph extraction pipeline
+│       ├── __init__.py
+│       ├── schemas.py               # Pydantic models: BusinessRecord, EvaluationResult, ExtractionState
+│       ├── config.py                # Centralised config — env vars, LLM factory, credentials
+│       ├── workflow.py              # LangGraph StateGraph (fixed pipeline)
+│       ├── supervisor.py            # ReAct supervisor agent (flexible alternative)
+│       ├── run.py                   # Batch runner — MLflow logging + Delta writes
+│       ├── scripts.py               # CLI entry point (uv run run-sec-extraction)
+│       │
+│       └── tools/                   # One file per agent/step
+│           ├── __init__.py
+│           ├── text_extraction.py   # Step 1 — Clean raw HTML/text
+│           ├── scraper.py           # Step 2 — Regex-based attribute extraction
+│           ├── retrieval.py         # Step 3 — Databricks Vector Search (RAG)
+│           ├── llm_extract.py       # Step 4 — LLM structured extraction
+│           ├── enrichment.py        # Step 5 — Derived fields (is_manufacturer, is_open, NAICS)
+│           ├── evaluate.py          # Step 6 — Self-evaluation + fill rate
+│           └── web_search.py        # Step 7 — Web fallback (DuckDuckGo / Serper)
+│
+├── ui/
+│   └── app.py                       # Streamlit UI — paste text, upload files, view results
+│
+├── scripts/
+│   ├── quickstart.py                # One-command setup (auth, experiment, deps)
+│   ├── start_app.py                 # Launches backend + Streamlit frontend together
+│   ├── discover_tools.py            # Discover available Databricks workspace resources
+│   └── grant_lakebase_permissions.py
+│
+├── .env                             # Local config (profile, experiment ID, vector search)
+├── .env.example                     # Template for .env
+├── databricks.yml                   # Databricks Asset Bundle config (deploy, resources)
+├── pyproject.toml                   # Python deps + script entry points
+├── uv.lock                          # Locked dependencies
+└── README.md                        # This file
+```
 
-## Build with AI Assistance
+---
 
-We recommend using AI coding assistants (Claude Code, Cursor, GitHub Copilot) to customize and deploy this template. Agent Skills in `.claude/skills/` provide step-by-step guidance for common tasks like setup, adding tools, and deployment. These skills are automatically detected by Claude, Cursor, and GitHub Copilot.
+## Architecture
 
-## Quick start
+```
+                        ┌─────────────────────┐
+                        │   Raw SEC Filing     │
+                        │   (text / HTML)      │
+                        └─────────┬───────────┘
+                                  │
+                                  ▼
+                   ┌──────────────────────────┐
+                   │  1. Text Extraction       │  Strip HTML, normalise whitespace
+                   │     (text_extraction.py)   │
+                   └─────────────┬────────────┘
+                                 │
+                                 ▼
+                   ┌──────────────────────────┐
+                   │  2. Regex Scraper         │  Pattern-match phone, address, NAICS, etc.
+                   │     (scraper.py)           │
+                   └─────────────┬────────────┘
+                                 │
+                                 ▼
+                   ┌──────────────────────────┐
+                   │  3. Vector Search         │  Query Databricks VSI for relevant chunks
+                   │     Retrieval (RAG)        │  Index: hackathon_521302447211702.aa
+                   │     (retrieval.py)         │         .vsi_using_bge_large_on_sections
+                   └─────────────┬────────────┘
+                                 │
+                                 ▼
+                   ┌──────────────────────────┐
+                   │  4. LLM Extraction        │  Structured extraction via Databricks-hosted LLM
+                   │     (llm_extract.py)       │  Model: databricks-claude-sonnet-4-5
+                   └─────────────┬────────────┘
+                                 │
+                                 ▼
+                   ┌──────────────────────────┐
+                   │  5. Enrichment            │  Derive is_manufacturer, is_open,
+                   │     (enrichment.py)        │  expand NAICS → industry description
+                   └─────────────┬────────────┘
+                                 │
+                                 ▼
+                   ┌──────────────────────────┐
+                   │  6. Self-Evaluation       │  Compute fill_rate, flag missing fields
+                   │     (evaluate.py)          │
+                   └─────────────┬────────────┘
+                                 │
+                          fill_rate < 0.5?
+                         ┌───────┴───────┐
+                         │ YES           │ NO
+                         ▼               ▼
+          ┌──────────────────────┐     DONE ──► BusinessRecord (JSON)
+          │  7. Web Fallback     │
+          │     (web_search.py)  │  DuckDuckGo / Serper API
+          └──────────┬──────────┘
+                     │
+                     ▼
+          Re-extract with LLM (step 4+5)
+                     │
+                     ▼
+          Re-evaluate (step 6) ──► DONE
+```
 
-Run the `uv run quickstart` script to quickly set up your local environment and start the agent server. At any step, if there are issues, refer to the manual local development loop setup below.
+### Two Execution Modes
 
-This script will:
+| Mode | File | Best for |
+|------|------|----------|
+| **Fixed pipeline** (LangGraph) | `workflow.py` | Production / batch — deterministic, predictable |
+| **ReAct supervisor** (LangChain Agent) | `supervisor.py` | Interactive exploration — LLM decides tool order |
 
-1. Verify uv, nvm, and Databricks CLI installations
-2. Configure Databricks authentication
-3. Configure agent tracing, by creating and linking an MLflow experiment to your app
-4. Start the agent server and chat app
+### Output Schema — `BusinessRecord`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `business_name` | `str` | Legal entity name |
+| `parent_name` | `str` | Parent company (if any) |
+| `business_phone` | `str` | Primary phone number |
+| `address` | `str` | Street address |
+| `city` | `str` | City |
+| `state` | `str` | State |
+| `zip_code` | `str` | ZIP/postal code |
+| `industry_description` | `str` | Industry narrative |
+| `naics_sic_codes` | `list[str]` | NAICS / SIC codes |
+| `num_employees` | `str` | Employee count |
+| `is_manufacturer` | `bool` | Manufacturing indicator |
+| `risk_factor_keywords` | `list[str]` | Risk keywords from filings |
+| `revenue_mentions` | `list[str]` | Revenue figures mentioned |
+| `website_domain` | `str` | Company website |
+| `business_purpose_summary` | `str` | Business description |
+| `is_open` | `bool` | Whether business is currently operating |
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.11+
+- [`uv`](https://docs.astral.sh/uv/getting-started/installation/) (Python package manager)
+- [Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/install)
+
+### 1. Set up authentication
 
 ```bash
 uv run quickstart
 ```
 
-After the setup is complete, you can start the agent server and the chat app locally with:
+Or manually:
+
+```bash
+databricks auth login --host https://dbc-7c699d6a-b2cd.cloud.databricks.com
+```
+
+Verify your profile works:
+
+```bash
+databricks auth profiles
+```
+
+### 2. Configure environment
+
+Copy `.env.example` to `.env` (if not already done) and fill in the values:
+
+```bash
+cp .env.example .env
+```
+
+Key variables in `.env`:
+
+```env
+DATABRICKS_CONFIG_PROFILE=hackathon_ws
+
+MLFLOW_EXPERIMENT_ID=2932940041946963
+MLFLOW_TRACKING_URI="databricks://hackathon_ws"
+
+SEC_VECTOR_SEARCH_ENDPOINT=sec_endpoint
+SEC_VECTOR_SEARCH_INDEX=hackathon_521302447211702.aa.vsi_using_bge_large_on_sections
+```
+
+### 3. Run locally
+
+Start both the backend API server and the Streamlit UI:
 
 ```bash
 uv run start-app
 ```
 
-This will start the agent server and the chat app at http://localhost:8000.
+This launches:
+- **Backend** at `http://localhost:8000` (MLflow AgentServer + FastAPI)
+- **Streamlit UI** at `http://localhost:3000` (opens in browser)
 
-**Next steps**: see [modifying your agent](#modifying-your-agent) to customize and iterate on the agent code.
+### 4. Run via CLI (no UI)
 
-## Manual local development loop setup
+Extract from inline text:
 
-1. **Set up your local environment**
-   Install `uv` (python package manager), `nvm` (node version manager), and the Databricks CLI:
+```bash
+uv run run-sec-extraction --document "ACME CORP 10-K Filing ..."
+```
 
-   - [`uv` installation docs](https://docs.astral.sh/uv/getting-started/installation/)
-   - [`nvm` installation](https://github.com/nvm-sh/nvm?tab=readme-ov-file#installing-and-updating)
-     - Run the following to use Node 20 LTS:
-       ```bash
-       nvm use 20
-       ```
-   - [`databricks CLI` installation](https://docs.databricks.com/aws/en/dev-tools/cli/install)
+Extract from a file:
 
-2. **Set up local authentication to Databricks**
+```bash
+uv run run-sec-extraction --file path/to/filing.txt --output results.json
+```
 
-   In order to access Databricks resources from your local machine while developing your agent, you need to authenticate with Databricks. Choose one of the following options:
+Use the ReAct supervisor instead of the fixed pipeline:
 
-   **Option 1: OAuth via Databricks CLI (Recommended)**
+```bash
+uv run run-sec-extraction --file path/to/filing.txt --mode supervisor
+```
 
-   Authenticate with Databricks using the CLI. See the [CLI OAuth documentation](https://docs.databricks.com/aws/en/dev-tools/cli/authentication#oauth-user-to-machine-u2m-authentication).
+### 5. Query the API directly
 
-   ```bash
-   databricks auth login
-   ```
+Non-streaming:
 
-   Set the `DATABRICKS_CONFIG_PROFILE` environment variable in your .env file to the profile you used to authenticate:
+```bash
+curl -X POST http://localhost:8000/invocations \
+  -H "Content-Type: application/json" \
+  -d '{ "input": [{ "role": "user", "content": "Extract: ACME CORP, 123 Main St..." }] }'
+```
 
-   ```bash
-   DATABRICKS_CONFIG_PROFILE="DEFAULT" # change to the profile name you chose
-   ```
+Streaming:
 
-   **Option 2: Personal Access Token (PAT)**
+```bash
+curl -X POST http://localhost:8000/invocations \
+  -H "Content-Type: application/json" \
+  -d '{ "input": [{ "role": "user", "content": "Extract: ACME CORP..." }], "stream": true }'
+```
 
-   See the [PAT documentation](https://docs.databricks.com/aws/en/dev-tools/auth/pat#databricks-personal-access-tokens-for-workspace-users).
+---
 
-   ```bash
-   # Add these to your .env file
-   DATABRICKS_HOST="https://host.databricks.com"
-   DATABRICKS_TOKEN="dapi_token"
-   ```
+## Advanced Server Options
 
-   See the [Databricks SDK authentication docs](https://docs.databricks.com/aws/en/dev-tools/sdk-python#authenticate-the-databricks-sdk-for-python-with-your-databricks-account-or-workspace).
+```bash
+uv run start-server --reload    # Hot-reload on code changes
+uv run start-server --port 8001 # Custom port
+uv run start-server --workers 4 # Multi-worker
+```
 
-   > **Note:** Querying another Databricks App requires **OAuth** authentication. PATs will not work for app-to-app calls.
+---
 
-3. **Create and link an MLflow experiment to your app**
+## Evaluating the Agent
 
-   Create an MLflow experiment to enable tracing and version tracking. This is automatically done by the `uv run quickstart` script.
-
-   Create the MLflow experiment via the CLI:
-
-   ```bash
-   DATABRICKS_USERNAME=$(databricks current-user me | jq -r .userName)
-   databricks experiments create-experiment /Users/$DATABRICKS_USERNAME/agents-on-apps
-   ```
-
-   Make a copy of `.env.example` to `.env` and update the `MLFLOW_EXPERIMENT_ID` in your `.env` file with the experiment ID you created. The `.env` file will be automatically loaded when starting the server.
-
-   ```bash
-   cp .env.example .env
-   # Edit .env and fill in your experiment ID
-   ```
-
-   See the [MLflow experiments documentation](https://docs.databricks.com/aws/en/mlflow/experiments#create-experiment-from-the-workspace).
-
-4. **Test your agent locally**
-
-   Start up the agent server and chat UI locally:
-
-   ```bash
-   uv run start-app
-   ```
-
-   Query your agent via the UI (http://localhost:8000) or REST API:
-
-   **Advanced server options:**
-
-   ```bash
-   uv run start-server --reload   # hot-reload the server on code changes
-   uv run start-server --port 8001 # change the port the server listens on
-   uv run start-server --workers 4 # run the server with multiple workers
-   ```
-
-   - Example streaming request:
-     ```bash
-     curl -X POST http://localhost:8000/invocations \
-     -H "Content-Type: application/json" \
-     -d '{ "input": [{ "role": "user", "content": "hi" }], "stream": true }'
-     ```
-   - Example non-streaming request:
-     ```bash
-     curl -X POST http://localhost:8000/invocations  \
-     -H "Content-Type: application/json" \
-     -d '{ "input": [{ "role": "user", "content": "hi" }] }'
-     ```
-
-## Modifying your agent
-
-See the [OpenAI Agents SDK documentation](https://platform.openai.com/docs/guides/agents-sdk) for more information on how to edit your own agent.
-
-Required files for hosting with MLflow `AgentServer`:
-
-- `agent.py`: Contains your agent logic. Modify this file to create your custom agent. For example, you can [add agent tools](https://docs.databricks.com/aws/en/generative-ai/agent-framework/agent-tool) to give your agent additional capabilities
-- `start_server.py`: Initializes and runs the MLflow `AgentServer` with agent_type="ResponsesAgent". You don't have to modify this file for most common use cases, but can add additional server routes (e.g. a `/metrics` endpoint) here
-
-**Common customization questions:**
-
-**Q: Can I add additional files or folders to my agent?**
-Yes. Add additional files or folders as needed. Ensure the script within `pyproject.toml` runs the correct script that starts the server and sets up MLflow tracing.
-
-**Q: How do I add dependencies to my agent?**
-Run `uv add <package_name>` (e.g., `uv add "mlflow-skinny[databricks]"`). See the [python pyproject.toml guide](https://packaging.python.org/en/latest/guides/writing-pyproject-toml/#dependencies-and-requirements).
-
-**Q: Can I add custom tracing beyond the built-in tracing?**
-Yes. This template uses MLflow's agent server, which comes with automatic tracing for agent logic decorated with `@invoke()` and `@stream()`. It also uses [MLflow autologging APIs](https://mlflow.org/docs/latest/genai/tracing/#one-line-auto-tracing-integrations) to capture traces from LLM invocations. However, you can add additional instrumentation to capture more granular trace information when your agent runs. See the [MLflow tracing documentation](https://docs.databricks.com/aws/en/mlflow3/genai/tracing/app-instrumentation/).
-
-**Q: How can I extend this example with additional tools and capabilities?**
-This template can be extended by integrating additional MCP servers, Vector Search Indexes, UC Functions, and other Databricks tools. See the ["Agent Framework Tools Documentation"](https://docs.databricks.com/aws/en/generative-ai/agent-framework/agent-tool).
-
-## Evaluating your agent
-
-Evaluate your agent by calling the invoke function you defined for the agent locally.
-
-- Update your `evaluate_agent.py` file with the preferred evaluation dataset and scorers.
-
-Run the evaluation using the evaluation script:
+Update test cases in `agent_server/evaluate_agent.py`, then:
 
 ```bash
 uv run agent-evaluate
 ```
 
-After it completes, open the MLflow UI link for your experiment to inspect results.
+Results are logged to your MLflow experiment — open the Databricks UI to inspect.
+
+---
 
 ## Deploying to Databricks Apps
 
-0. **Create a Databricks App**:
-   Ensure you have the [Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/tutorial) installed and configured.
+### Validate
 
-   ```bash
-   databricks apps create agent-openai-agents-sdk-multiagent
+```bash
+databricks bundle validate --profile hackathon_ws
+```
+
+### Deploy
+
+```bash
+databricks bundle deploy --profile hackathon_ws
+```
+
+### Start
+
+```bash
+databricks bundle run agent_openai_agents_sdk_multiagent --profile hackathon_ws
+```
+
+### View logs
+
+```bash
+databricks apps logs agent-sec-extraction --follow --profile hackathon_ws
+```
+
+### Query the deployed app
+
+```bash
+TOKEN=$(databricks auth token --profile hackathon_ws | jq -r .access_token)
+
+curl -X POST https://<app-url>.databricksapps.com/invocations \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "input": [{ "role": "user", "content": "Extract: ..." }] }'
+```
+
+---
+
+## Key Dependencies
+
+| Package | Purpose |
+|---------|---------|
+| `langchain` / `langchain-core` | Agent framework, prompt templates, tool interface |
+| `langchain-openai` | ChatOpenAI for Databricks model serving endpoints |
+| `langgraph` | StateGraph for the fixed extraction pipeline |
+| `mlflow` | Tracing, experiment tracking, AgentServer |
+| `databricks-agents` | MLflow Responses API integration |
+| `duckduckgo-search` | Web search fallback |
+| `streamlit` | Frontend UI |
+
+---
+
+## Extending the Pipeline
+
+Each tool in `agent_server/sec_extraction/tools/` is a standalone module. To add a new step:
+
+1. Create a new file in `tools/` (e.g., `tools/my_new_step.py`)
+2. Implement a function that takes state inputs and returns extracted data
+3. Add the node in `workflow.py`:
+   ```python
+   graph.add_node("my_step", my_step_node)
+   graph.add_edge("previous_step", "my_step")
    ```
+4. Add new fields to `BusinessRecord` in `schemas.py` if needed
+5. Wrap it as a `@tool` in `supervisor.py` for the ReAct agent
 
-1. **Set up authentication to Databricks resources**
+---
 
-   For this example, you need to add an MLflow Experiment as a resource to your app. Grant the App's Service Principal (SP) permission to edit the experiment by clicking `edit` on your app home page. See the [Databricks Apps MLflow experiment documentation](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/mlflow) for more information.
+## Collaboration
 
-   To grant access to other resources like serving endpoints, genie spaces, UC Functions, and Vector Search Indexes, click `edit` on your app home page to grant the App's SP permission. See the [Databricks Apps resources documentation](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/resources).
+To collaborate with others on this repo:
 
-   For resources that are not supported yet, see the [Agent Framework authentication documentation](https://docs.databricks.com/aws/en/generative-ai/agent-framework/deploy-agent#automatic-authentication-passthrough) for the correct permission level to grant to your app SP.
-
-   **On-behalf-of (OBO) User Authentication**: Use `get_user_workspace_client()` from `agent_server.utils` to authenticate as the requesting user instead of the app service principal. See the [OBO authentication documentation](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/auth?language=Streamlit#retrieve-user-authorization-credentials).
-
-2. **Sync local files to your workspace**
-
-   See the [Databricks Apps deploy documentation](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/deploy?language=Databricks+CLI#deploy-the-app).
-
-   ```bash
-   DATABRICKS_USERNAME=$(databricks current-user me | jq -r .userName)
-   databricks sync . "/Users/$DATABRICKS_USERNAME/agent-openai-agents-sdk-multiagent"
-   ```
-
-3. **Deploy your Databricks App**
-
-   See the [Databricks Apps deploy documentation](https://docs.databricks.com/aws/en/dev-tools/databricks-apps/deploy?language=Databricks+CLI#deploy-the-app).
-
-   ```bash
-   databricks apps deploy agent-openai-agents-sdk-multiagent --source-code-path /Workspace/Users/$DATABRICKS_USERNAME/agent-openai-agents-sdk-multiagent
-   ```
-
-4. **Query your agent hosted on Databricks Apps**
-
-   Databricks Apps are _only_ queryable via OAuth token. You cannot use a PAT to query your agent. Generate an [OAuth token with your credentials using the Databricks CLI](https://docs.databricks.com/aws/en/dev-tools/cli/authentication#u2m-auth):
-
-   ```bash
-   databricks auth login --host <https://host.databricks.com>
-   databricks auth token
-   ```
-
-   Send a request to the `/invocations` endpoint:
-
-   - Example streaming request:
-
-     ```bash
-     curl -X POST <app-url.databricksapps.com>/invocations \
-        -H "Authorization: Bearer <oauth token>" \
-        -H "Content-Type: application/json" \
-        -d '{ "input": [{ "role": "user", "content": "hi" }], "stream": true }'
-     ```
-
-   - Example non-streaming request:
-
-     ```bash
-     curl -X POST <app-url.databricksapps.com>/invocations \
-        -H "Authorization: Bearer <oauth token>" \
-        -H "Content-Type: application/json" \
-        -d '{ "input": [{ "role": "user", "content": "hi" }] }'
-     ```
-
-For future updates to the agent, sync and redeploy your agent.
-
-### FAQ
-
-- For a streaming response, I see a 200 OK in the logs, but an error in the actual stream. What's going on?
-  - This is expected behavior. The initial 200 OK confirms stream setup; streaming errors don't affect this status.
-- When querying my agent, I get a 302 error. What's going on?
-  - Use an OAuth token. PATs are not supported for querying agents.
+1. Each team member runs `databricks auth login` to set up their own profile
+2. Copy `.env.example` to `.env` and fill in their profile name
+3. The `.env` file is gitignored — credentials stay local
+4. Shared resources (experiment ID, vector search index) are configured in `databricks.yml`

@@ -88,22 +88,34 @@ def enrich_record(record_dict: dict, source_text: str) -> dict:
 
     Mutates and returns *record_dict* in place.
     """
-    codes = record_dict.get("naics_sic_codes") or []
+    naics = record_dict.get("primary_naics_code_id") or ""
+    sic = record_dict.get("primary_sic_code_id") or ""
+    codes = [c for c in [naics, sic] if c]
 
-    # ---- is_manufacturer ---------------------------------------------------
-    if record_dict.get("is_manufacturer") is None:
+    # ---- in_business -------------------------------------------------------
+    if not record_dict.get("in_business"):
+        is_closed = bool(CLOSURE_KEYWORDS.search(source_text))
+        record_dict["in_business"] = "No" if is_closed else "Yes"
+
+    # ---- company_active_indicator ------------------------------------------
+    if record_dict.get("company_active_indicator") is None:
+        record_dict["company_active_indicator"] = record_dict.get("in_business") != "No"
+
+    # ---- place_type from SIC codes -----------------------------------------
+    if not record_dict.get("place_type"):
         code_mfg = _is_manufacturer_from_codes(codes)
         keyword_mfg = bool(MANUFACTURER_KEYWORDS.search(source_text))
-        record_dict["is_manufacturer"] = code_mfg or keyword_mfg
+        if code_mfg or keyword_mfg:
+            record_dict["place_type"] = "Manufacturer"
 
-    # ---- is_open -----------------------------------------------------------
-    if record_dict.get("is_open") is None:
-        record_dict["is_open"] = not bool(CLOSURE_KEYWORDS.search(source_text))
-
-    # ---- industry_description from NAICS -----------------------------------
-    if not record_dict.get("industry_description") and codes:
-        naics_desc = _naics_industry(codes)
+    # ---- company_sic_name / company_naics_name from codes ------------------
+    if not record_dict.get("company_sic_name") and sic:
+        naics_desc = _naics_industry([sic])
         if naics_desc:
-            record_dict["industry_description"] = naics_desc
+            record_dict["company_sic_name"] = naics_desc
+    if not record_dict.get("company_naics_name") and naics:
+        naics_desc = _naics_industry([naics])
+        if naics_desc:
+            record_dict["company_naics_name"] = naics_desc
 
     return record_dict

@@ -10,11 +10,15 @@ full "AI Extraction" mode that calls the agent backend.
 import json
 import os
 import re
+import sys
 import time
 
 import pandas as pd
 import requests
 import streamlit as st
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from agent_server.sec_extraction.attribute_registry import get_registry
 
 # ---------------------------------------------------------------------------
 # Page configuration
@@ -75,46 +79,50 @@ st.markdown(
 
 API_URL = os.environ.get("API_PROXY", "http://localhost:8000/invocations")
 
-ATTRIBUTE_LABELS = {
-    "business_name": ("🏢", "Business Name"),
-    "parent_name": ("🏛️", "Parent Company"),
-    "business_phone": ("📞", "Phone"),
-    "address_city_state_zip": ("📍", "Address"),
-    "industry_description": ("🏭", "Industry"),
-    "naics_sic_candidates": ("🔢", "NAICS / SIC"),
-    "number_of_employees": ("👥", "Employees"),
-    "is_manufacturer": ("⚙️", "Manufacturer?"),
-    "risk_factor_keywords": ("⚠️", "Risk Factors"),
-    "revenue_mentions": ("💰", "Revenue"),
-    "website_domain": ("🌐", "Website"),
-    "business_purpose_summary": ("📝", "Business Purpose"),
-}
+_registry = get_registry()
+ATTRIBUTE_LABELS = _registry.get_labels_for_ui()
 
 QUICK_SCRAPE_PATTERNS = {
-    "business_phone": [
+    "phone": [
         r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}",
         r"\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}",
     ],
-    "website_domain": [
+    "website": [
         r"(?:https?://)?(?:www\.)?([a-zA-Z0-9][-a-zA-Z0-9]*\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?)",
     ],
-    "number_of_employees": [
+    "location_employee_count": [
         r"(?:approximately|about|nearly|over|more than)?\s*(\d{1,3}(?:,\d{3})*)\s+(?:full[- ]?time\s+)?employees",
         r"(\d{1,3}(?:,\d{3})*)\s+(?:people|personnel|workers)",
     ],
-    "revenue_mentions": [
+    "revenue": [
         r"\$\s*[\d,]+(?:\.\d+)?\s*(?:billion|million|thousand|B|M|K)",
         r"(?:revenue|net\s+sales|total\s+revenue)\s+(?:of|was|were|totaled)?\s*\$\s*[\d,]+(?:\.\d+)?",
     ],
-    "address_city_state_zip": [
-        r"\d+\s+[\w\s]+(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Boulevard|Blvd|Way|Lane|Ln|Place|Pl|Suite|Ste)\.?\s*,?\s*(?:Suite|Ste\.?\s*\d+\s*,?\s*)?[\w\s]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?",
+    "street": [
+        r"\d+\s+[\w\s]+(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Boulevard|Blvd|Way|Lane|Ln|Place|Pl|Suite|Ste)\.?(?:\s*,?\s*(?:Suite|Ste)\.?\s*\d+)?",
     ],
-    "naics_sic_candidates": [
-        r"(?:NAICS|SIC)\s*(?:code|Code)?:?\s*(\d{4,6})",
+    "postal_code": [
+        r"\b[A-Z]{2}\s+(\d{5}(?:-\d{4})?)\b",
+    ],
+    "primary_sic_code_id": [
+        r"(?:SIC)\s*(?:code|Code)?:?\s*(\d{4,6})",
         r"Standard\s+Industrial\s+Classification\s*(?:code)?\s*:?\s*(\d{4})",
     ],
-    "business_name": [
+    "primary_naics_code_id": [
+        r"(?:NAICS)\s*(?:code|Code)?:?\s*(\d{4,6})",
+    ],
+    "name": [
         r"(?:EXACT NAME OF REGISTRANT|Company Name|Registrant)[:\s]+([A-Z][\w\s&.,'-]+(?:Inc|Corp|LLC|Ltd|Co|LP|Company|Corporation|Group|Holdings)\.?)",
+    ],
+    "company_ein": [
+        r"(?:EIN|Employer\s+Identification\s+Number)[:\s]*(\d{2}-?\d{7})",
+    ],
+    "company_year_founded": [
+        r"(?:founded|incorporated|established)\s+(?:in\s+)?(\d{4})",
+    ],
+    "cik": [
+        r"(?:CIK|Central\s+Index\s+Key)[:\s]*(\d{7,10})",
+        r"Commission\s+File\s+Number[:\s]*([\d-]+)",
     ],
 }
 
@@ -220,61 +228,37 @@ def extract_response_text(data: dict) -> str:
 
 
 def _agent_record_to_ui_format(record: dict, evaluation: dict | None = None) -> dict:
-    """Transform agent's BusinessRecord format to UI display format."""
+    """Transform agent's extraction record to UI display format using the registry."""
     ev = evaluation or {}
+    conf = ev.get("confidence", 0.8)
     attrs: dict = {}
 
-    # Map agent fields to UI attribute format (value, confidence, source, evidence)
-    def make_attr(val, conf=0.9, src="llm_inference"):
-        return {"value": val, "confidence": conf, "source": src, "evidence": ""}
+    for key, val in record.items():
+        if key not in ATTRIBUTE_LABELS:
+            continue
+        if isinstance(val, list):
+            display_val = ", ".join(str(v) for v in val) if val else None
+        else:
+            display_val = val
+        attrs[key] = {
+            "value": display_val,
+            "confidence": conf if display_val is not None else 0.0,
+            "source": "llm_inference",
+            "evidence": "",
+        }
 
-    # Direct mappings
-    for field in (
-        "business_name", "parent_name", "business_phone", "industry_description",
-        "website_domain", "business_purpose_summary", "is_manufacturer",
-    ):
-        attrs[field] = make_attr(record.get(field))
+    # Fill in missing registry attributes so the UI can show them
+    for key in ATTRIBUTE_LABELS:
+        if key not in attrs:
+            attrs[key] = {"value": None, "confidence": 0.0, "source": "llm_inference", "evidence": ""}
 
-    # Combined address
-    addr_parts = [
-        record.get("address"),
-        record.get("city"),
-        record.get("state"),
-        record.get("zip_code"),
-    ]
-    addr_str = ", ".join(str(p) for p in addr_parts if p)
-    attrs["address_city_state_zip"] = make_attr(addr_str if addr_str else None)
-
-    # naics_sic_codes -> naics_sic_candidates
-    codes = record.get("naics_sic_codes") or []
-    attrs["naics_sic_candidates"] = make_attr(
-        ", ".join(str(c) for c in codes) if codes else None
-    )
-
-    # num_employees -> number_of_employees
-    attrs["number_of_employees"] = make_attr(record.get("num_employees"))
-
-    # List fields
-    risk = record.get("risk_factor_keywords") or []
-    attrs["risk_factor_keywords"] = make_attr(
-        ", ".join(str(r) for r in risk) if risk else None
-    )
-    rev = record.get("revenue_mentions") or []
-    attrs["revenue_mentions"] = make_attr(
-        ", ".join(str(r) for r in rev) if rev else None
-    )
-
-    conf = ev.get("confidence", 0.8)
-    for a in attrs.values():
-        if a.get("value") is not None and a.get("confidence", 0) == 0.9:
-            a["confidence"] = conf
-
-    is_open = record.get("is_open")
-    status = "open" if (is_open is None or is_open) else "closed"
+    biz_name = record.get("name") or record.get("company_name") or "Unknown Company"
+    in_biz = record.get("in_business", "")
+    status = "closed" if str(in_biz).lower() in ("no", "false", "closed") else "open"
     reasoning = "; ".join(ev.get("issues", [])) or "Extracted from SEC filing"
 
     return {
-        "company_name": record.get("business_name") or "Unknown Company",
+        "company_name": biz_name,
         "filing_type": "Unknown",
         "attributes": attrs,
         "business_status": status,
@@ -282,38 +266,36 @@ def _agent_record_to_ui_format(record: dict, evaluation: dict | None = None) -> 
     }
 
 
+def _is_agent_record(d: dict) -> bool:
+    """Check if a dict looks like an agent extraction record (has registry fields)."""
+    registry_keys = set(_registry.attribute_names)
+    return len(set(d.keys()) & registry_keys) >= 3
+
+
 def parse_extraction_json(text: str) -> dict | None:
     """Extract the JSON block from the agent's markdown-wrapped response and normalize to UI format."""
-    # Extract content between ```json and ``` (handles nested JSON)
-    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
-    if match:
-        raw = match.group(1).strip()
+    def _try_parse(raw: str) -> dict | None:
         try:
             parsed = json.loads(raw)
-            if isinstance(parsed, dict):
-                # Agent returns record; may be wrapped in {"record": ..., "evaluation": ...}
-                record = parsed.get("record", parsed)
-                evaluation = parsed.get("evaluation") if "evaluation" in parsed else None
-                if record.get("business_name") is not None or any(
-                    k in record for k in ("business_phone", "industry_description", "website_domain")
-                ):
-                    return _agent_record_to_ui_format(record, evaluation)
-                return parsed
-        except json.JSONDecodeError:
-            pass
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            record = parsed.get("record", parsed)
-            evaluation = parsed.get("evaluation") if "evaluation" in parsed else None
-            if record.get("business_name") is not None or any(
-                k in record for k in ("business_phone", "industry_description", "website_domain")
-            ):
-                return _agent_record_to_ui_format(record, evaluation)
-            return parsed
-    except (json.JSONDecodeError, TypeError):
-        pass
-    return None
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        record = parsed.get("record", parsed)
+        evaluation = parsed.get("evaluation") if "evaluation" in parsed else None
+        if _is_agent_record(record):
+            return _agent_record_to_ui_format(record, evaluation)
+        return parsed
+
+    # Try ```json ... ``` block first
+    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+    if match:
+        result = _try_parse(match.group(1).strip())
+        if result:
+            return result
+
+    # Try the entire text as JSON
+    return _try_parse(text)
 
 
 def confidence_class(score: float) -> str:
@@ -379,7 +361,7 @@ def quick_scrape(text: str) -> dict:
     }
 
     return {
-        "company_name": results.get("business_name", {}).get("value", "Unknown"),
+        "company_name": results.get("name", {}).get("value") or results.get("company_name", {}).get("value") or "Unknown",
         "filing_type": "Unknown",
         "attributes": results,
         "business_status": "open",
@@ -593,9 +575,12 @@ with st.sidebar:
     api_url = st.text_input("Backend API URL", value=API_URL, help="URL of the agent backend `/invocations` endpoint")
 
     st.markdown("---")
-    st.markdown("### Target Attributes")
-    for attr, (icon, label) in ATTRIBUTE_LABELS.items():
-        st.markdown(f"{icon} {label}")
+    st.markdown(f"### Target Attributes ({len(ATTRIBUTE_LABELS)})")
+    for group_name, group_attrs in _registry.groups.items():
+        with st.expander(f"{group_name} ({len(group_attrs)})"):
+            for a in group_attrs:
+                icon, label = ATTRIBUTE_LABELS.get(a["attribute"], ("📌", a["display_name"]))
+                st.markdown(f"{icon} {label}")
 
     st.markdown("---")
     st.markdown("### Extraction Modes")

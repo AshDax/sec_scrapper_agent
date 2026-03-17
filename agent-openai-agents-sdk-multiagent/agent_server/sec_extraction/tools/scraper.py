@@ -21,38 +21,45 @@ import re
 # ---------------------------------------------------------------------------
 
 PATTERNS: dict[str, list[str]] = {
-    "business_name": [
+    "name": [
         r"(?:EXACT NAME OF REGISTRANT|Company Name|Registrant)[:\s]+([A-Z][\w\s&.,'-]+(?:Inc|Corp|LLC|Ltd|Co|LP|Company|Corporation|Group|Holdings)\.?)",
         r"^([A-Z][A-Z\s&.,'-]+(?:INC|CORP|LLC|LTD|CO|LP|COMPANY|CORPORATION|GROUP|HOLDINGS)\.?)\s*$",
     ],
-    "business_phone": [
+    "phone": [
         r"\((\d{3})\)\s*(\d{3})[-.](\d{4})",
         r"(?:Telephone|Phone|Tel)[:\s]*\(?(\d{3})\)?[-.\s]?(\d{3})[-.\s]?(\d{4})",
     ],
-    "website_domain": [
+    "website": [
         r"(?:https?://)?(?:www\.)?([a-zA-Z0-9][-a-zA-Z0-9]*\.(?:com|org|net|io|co|gov|edu)(?:\.[a-zA-Z]{2})?)",
     ],
-    "num_employees": [
+    "location_employee_count": [
         r"(?:approximately|about|nearly|over|more than)?\s*(\d{1,3}(?:,\d{3})*)\s+(?:full[- ]?time\s+)?employees",
         r"(\d{1,3}(?:,\d{3})*)\s+(?:people|personnel|workers|staff)",
         r"(?:headcount|workforce)\s+(?:of\s+)?(?:approximately\s+)?(\d{1,3}(?:,\d{3})*)",
     ],
-    "revenue_mentions": [
+    "revenue": [
         r"(\$\s*[\d,]+(?:\.\d+)?\s*(?:billion|million|thousand|B|M|K))",
         r"(?:revenue|net\s+sales|total\s+revenue)\s+(?:of|was|were|totaled)?\s*(\$\s*[\d,]+(?:\.\d+)?(?:\s*(?:billion|million))?)",
     ],
-    "address": [
+    "street": [
         r"(\d+\s+[\w\s]+(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Boulevard|Blvd|Way|Lane|Ln|Place|Pl|Suite|Ste)\.?(?:\s*,?\s*(?:Suite|Ste)\.?\s*\d+)?)",
     ],
-    "zip_code": [
+    "postal_code": [
         r"\b([A-Z]{2})\s+(\d{5}(?:-\d{4})?)\b",
     ],
-    "naics_sic_codes": [
-        r"(?:NAICS|SIC)\s*(?:code|Code)?:?\s*(\d{4,6})",
+    "primary_sic_code_id": [
+        r"(?:SIC)\s*(?:code|Code)?:?\s*(\d{4,6})",
         r"Standard\s+Industrial\s+Classification\s*(?:code)?\s*:?\s*(\d{4})",
     ],
-    "risk_factor_keywords": [
-        r"(?:risk\s+factor|risks?\s+include)[s:]?\s*[-•]\s*(.+?)(?:\n|$)",
+    "primary_naics_code_id": [
+        r"(?:NAICS)\s*(?:code|Code)?:?\s*(\d{4,6})",
+    ],
+    "company_ein": [
+        r"(?:EIN|Employer\s+Identification\s+Number)[:\s]*(\d{2}-?\d{7})",
+    ],
+    "cik": [
+        r"(?:CIK|Central\s+Index\s+Key)[:\s]*(\d{7,10})",
+        r"Commission\s+File\s+Number[:\s]*([\d-]+)",
     ],
 }
 
@@ -86,25 +93,31 @@ def scrape_attributes(text: str) -> dict:
     result: dict = {}
 
     # Single-value fields
-    for field in ("business_name", "business_phone", "website_domain", "num_employees", "address"):
+    for field in ("name", "phone", "website", "location_employee_count", "street",
+                  "company_ein", "cik"):
         patterns = PATTERNS.get(field, [])
         val = _first_match(text, patterns)
         if val:
             result[field] = val
 
-    # Extract state + zip from the zip_code pattern
-    for pat in PATTERNS.get("zip_code", []):
+    # Extract state + postal_code
+    for pat in PATTERNS.get("postal_code", []):
         m = re.search(pat, text)
         if m:
             result["state"] = m.group(1)
-            result["zip_code"] = m.group(2)
+            result["postal_code"] = m.group(2) if m.lastindex and m.lastindex >= 2 else m.group(1)
             break
 
-    # List-value fields
-    for field in ("naics_sic_codes", "revenue_mentions", "risk_factor_keywords"):
+    # SIC / NAICS codes
+    for field in ("primary_sic_code_id", "primary_naics_code_id"):
         patterns = PATTERNS.get(field, [])
         vals = _all_matches(text, patterns)
         if vals:
-            result[field] = vals
+            result[field] = vals[0]
+
+    # Revenue (list field)
+    revenue_vals = _all_matches(text, PATTERNS.get("revenue", []))
+    if revenue_vals:
+        result["revenue"] = revenue_vals[0]
 
     return result

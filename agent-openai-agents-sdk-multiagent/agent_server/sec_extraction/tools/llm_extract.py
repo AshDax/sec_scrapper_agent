@@ -1,10 +1,10 @@
 """Step 4 — LLM Extractor Agent
 
 Uses a chat model (Databricks or Groq) with structured output to produce
-a full BusinessRecord from the filing text + any scraper/retrieval context.
+a full extraction record from the filing text + any scraper/retrieval context.
 
-The prompt is designed to be self-contained — extend it when you add
-new fields to BusinessRecord.
+The schema is loaded from attribute_registry (financial_datum_attributes.csv
+and place_attributes.csv).
 
 Usage:
     from agent_server.sec_extraction.tools.llm_extract import llm_extract_record
@@ -24,41 +24,34 @@ from langchain_core.messages import HumanMessage, SystemMessage
 if TYPE_CHECKING:
     from agent_server.sec_extraction.config import ExtractionConfig
 
-from agent_server.sec_extraction.schemas import BusinessRecord
+from agent_server.sec_extraction.attribute_registry import get_registry
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are a precise SEC filing data extractor.  Given the filing
+
+def _build_system_prompt() -> str:
+    """Build the LLM system prompt from the attribute registry."""
+    registry = get_registry()
+    schema_block = registry.get_json_schema_block()
+    desc_block = registry.get_descriptions_block()
+
+    return f"""You are a precise SEC filing and business data extractor. Given the filing
 text and any supplementary context, extract ALL of the following fields.
 
 Return ONLY valid JSON matching this schema (no markdown fences, no commentary):
 
-{
-  "business_name": "string or null",
-  "parent_name": "string or null",
-  "business_phone": "string or null",
-  "address": "string or null",
-  "city": "string or null",
-  "state": "string or null",
-  "zip_code": "string or null",
-  "industry_description": "string or null",
-  "naics_sic_codes": ["string", ...],
-  "num_employees": "string or null",
-  "is_manufacturer": true/false/null,
-  "risk_factor_keywords": ["string", ...],
-  "revenue_mentions": ["string", ...],
-  "website_domain": "string or null",
-  "business_purpose_summary": "one paragraph or null",
-  "is_open": true/false/null
-}
+{schema_block}
+
+Attribute descriptions:
+{desc_block}
 
 Rules:
 - Keep original values from the document (don't invent data).
-- For is_manufacturer, look for: manufactur, produc, fabricat, assembl, plant, factory.
-- For is_open, look for: dissolution, bankruptcy, ceased operations, wound down, liquidat.
+- For boolean fields (in_business, is_manufacturer, etc.), infer from context.
+- For is_open/in_business, look for: dissolution, bankruptcy, ceased operations, wound down.
   Default to true if no closure evidence.
-- For revenue_mentions, include the dollar amount AND context (e.g. "$487M total revenue FY2024").
-- For risk_factor_keywords, extract concise phrases (e.g. "supply chain disruption").
+- For revenue/financial fields, include numeric values when present.
+- For array fields, use empty list [] when no values found.
 """
 
 
@@ -100,8 +93,9 @@ def llm_extract_record(
     )
 
     try:
+        prompt = _build_system_prompt()
         response = llm.invoke([
-            SystemMessage(content=SYSTEM_PROMPT),
+            SystemMessage(content=prompt),
             HumanMessage(content=user_content),
         ])
 
@@ -113,8 +107,17 @@ def llm_extract_record(
 
         parsed = json.loads(raw)
 
-        record = BusinessRecord(**parsed)
-        return record.model_dump()
+        # Filter to only valid registry attributes
+        registry = get_registry()
+        valid_keys = set(registry.attribute_names)
+        record = {k: v for k, v in parsed.items() if k in valid_keys}
+
+        # Merge with scraper result for any fields we didn't get
+        for k, v in scraper_result.items():
+            if k in valid_keys and record.get(k) is None:
+                record[k] = v
+
+        return record
 
     except json.JSONDecodeError:
         logger.warning("LLM returned non-JSON — falling back to scraper result")

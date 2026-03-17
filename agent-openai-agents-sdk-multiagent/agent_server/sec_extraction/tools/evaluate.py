@@ -22,7 +22,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 if TYPE_CHECKING:
     from agent_server.sec_extraction.config import ExtractionConfig
 
-from agent_server.sec_extraction.schemas import BusinessRecord, EvaluationResult
+from agent_server.sec_extraction.attribute_registry import get_registry
+from agent_server.sec_extraction.schemas import EvaluationResult
 
 logger = logging.getLogger(__name__)
 
@@ -39,15 +40,15 @@ Return ONLY valid JSON:
 Check for:
 - Hallucinated values not present in the source
 - Incorrect data types (phone should be digits, zip should be 5 digits, etc.)
-- Missing critical fields (business_name, address)
+- Missing critical fields (name, street, company_name)
 - Implausible values (negative employees, future dates)
 """
 
 
 def compute_fill_rate(record_dict: dict) -> tuple[float, list[str]]:
-    """Return (fill_rate, missing_fields) for the given record dict."""
-    record = BusinessRecord(**record_dict)
-    return record.fill_rate(), record.missing_fields()
+    """Return (fill_rate, missing_fields) using the attribute registry."""
+    registry = get_registry()
+    return registry.compute_fill_rate(record_dict)
 
 
 def evaluate_record(

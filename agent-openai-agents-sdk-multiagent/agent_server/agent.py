@@ -27,9 +27,9 @@ from mlflow.types.responses import (
     ResponsesAgentStreamEvent,
 )
 
+from agent_server.sec_extraction.attribute_registry import get_registry
 from agent_server.sec_extraction.config import ExtractionConfig
 from agent_server.sec_extraction.workflow import extraction_workflow
-from agent_server.sec_extraction.schemas import BusinessRecord
 
 load_dotenv(dotenv_path=".env", override=True)
 
@@ -68,12 +68,16 @@ def _get_session_id(request: ResponsesAgentRequest) -> str | None:
 
 def _format_result(result: dict) -> str:
     """Turn a pipeline result dict into a human-readable response."""
+    registry = get_registry()
+    labels = registry.get_labels_for_ui()
+
     record = result.get("record", {})
     evaluation = result.get("evaluation", {})
     fill_rate = evaluation.get("fill_rate", 0)
 
-    biz_name = record.get("business_name", "Unknown Company")
-    status = "Open" if record.get("is_open", True) else "Closed"
+    biz_name = record.get("name") or record.get("company_name") or "Unknown Company"
+    in_biz = record.get("in_business", "")
+    status = "Closed" if str(in_biz).lower() in ("no", "false", "closed") else "Open"
 
     lines = [
         f"## Extraction Results — {biz_name}",
@@ -82,46 +86,32 @@ def _format_result(result: dict) -> str:
         "",
     ]
 
-    lines.append("### Extracted Attributes")
-    lines.append("")
-    lines.append("| Attribute | Value |")
-    lines.append("|-----------|-------|")
+    # Show only attributes that have values
+    filled = {k: v for k, v in record.items() if v is not None and v != [] and v != ""}
+    if filled:
+        lines.append("### Extracted Attributes")
+        lines.append("")
+        lines.append("| Attribute | Value |")
+        lines.append("|-----------|-------|")
 
-    labels = {
-        "business_name": "Business Name",
-        "parent_name": "Parent Company",
-        "business_phone": "Phone",
-        "address": "Address",
-        "city": "City",
-        "state": "State",
-        "zip_code": "Zip Code",
-        "industry_description": "Industry",
-        "naics_sic_codes": "NAICS/SIC Codes",
-        "num_employees": "Employees",
-        "is_manufacturer": "Manufacturer?",
-        "risk_factor_keywords": "Risk Factors",
-        "revenue_mentions": "Revenue",
-        "website_domain": "Website",
-        "business_purpose_summary": "Business Purpose",
-        "is_open": "Business Open?",
-    }
-
-    for field, label in labels.items():
-        val = record.get(field)
-        if val is None:
-            display = "*not found*"
-        elif isinstance(val, bool):
-            display = "Yes" if val else "No"
-        elif isinstance(val, list):
-            display = ", ".join(str(v) for v in val) if val else "*none*"
-        else:
-            display = str(val)
-        lines.append(f"| {label} | {display} |")
+        for field, val in filled.items():
+            _, label = labels.get(field, ("📌", field.replace("_", " ").title()))
+            if isinstance(val, bool):
+                display = "Yes" if val else "No"
+            elif isinstance(val, list):
+                display = ", ".join(str(v) for v in val)
+            else:
+                display = str(val)
+            if len(display) > 200:
+                display = display[:200] + "..."
+            lines.append(f"| {label} | {display} |")
 
     missing = evaluation.get("missing_fields", [])
     if missing:
         lines.append("")
-        lines.append(f"**Missing fields ({len(missing)}):** {', '.join(missing)}")
+        lines.append(f"**Missing fields ({len(missing)}):** {', '.join(missing[:20])}")
+        if len(missing) > 20:
+            lines.append(f"  ...and {len(missing) - 20} more")
 
     issues = evaluation.get("issues", [])
     if issues:
@@ -130,7 +120,6 @@ def _format_result(result: dict) -> str:
 
     lines.append("")
     lines.append("### Raw JSON")
-    # Include both record and evaluation so the UI can parse and display them
     structured = {"record": record, "evaluation": evaluation}
     lines.append("```json")
     lines.append(json.dumps(structured, indent=2, default=str))

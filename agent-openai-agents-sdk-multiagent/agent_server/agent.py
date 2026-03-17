@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 from typing import AsyncGenerator
+from uuid import uuid4
 
 import mlflow
 from dotenv import load_dotenv
@@ -129,8 +130,10 @@ def _format_result(result: dict) -> str:
 
     lines.append("")
     lines.append("### Raw JSON")
+    # Include both record and evaluation so the UI can parse and display them
+    structured = {"record": record, "evaluation": evaluation}
     lines.append("```json")
-    lines.append(json.dumps(record, indent=2, default=str))
+    lines.append(json.dumps(structured, indent=2, default=str))
     lines.append("```")
 
     return "\n".join(lines)
@@ -156,6 +159,7 @@ async def invoke_handler(request: ResponsesAgentRequest) -> ResponsesAgentRespon
     return ResponsesAgentResponse(
         output=[
             {
+                "id": str(uuid4()),
                 "type": "message",
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": response_text}],

@@ -120,11 +120,15 @@ class ProcessManager:
                         print(f"✓ API available at http://localhost:{self.port}")
                         print("=" * 50 + "\n")
                     elif self.backend_ready and self.frontend_ready:
-                        frontend_port = int(os.environ.get("CHAT_APP_PORT", os.environ.get("PORT", "3000")))
+                        ui_port = int(os.environ.get("CHAT_APP_PORT", os.environ.get("PORT", "3000")))
+                        api_port = self.port
+                        if os.environ.get("DATABRICKS_APP_NAME"):
+                            ui_port = 8000
+                            api_port = 8001
                         print("\n" + "=" * 50)
                         print("✓ Both frontend and backend are ready!")
-                        print(f"✓ Open the UI at http://localhost:{frontend_port}")
-                        print(f"✓ API available at http://localhost:{self.port}")
+                        print(f"✓ Open the UI at http://localhost:{ui_port}")
+                        print(f"✓ API available at http://localhost:{api_port}")
                         print("=" * 50 + "\n")
 
             process.wait()
@@ -185,15 +189,27 @@ class ProcessManager:
 
     def run(self, backend_args=None):
         load_dotenv(dotenv_path=".env", override=True)
-        if not os.environ.get("DATABRICKS_APP_NAME"):
+        is_databricks_app = bool(os.environ.get("DATABRICKS_APP_NAME"))
+
+        if not is_databricks_app:
             self.check_ports()
 
         if not self.no_ui:
             if not self.check_frontend_ready():
                 print("WARNING: Streamlit UI not found. Continuing with backend only.")
                 self.no_ui = True
-            else:
-                os.environ["API_PROXY"] = f"http://localhost:{self.port}/invocations"
+
+        # On Databricks Apps, port 8000 is the only externally-exposed port.
+        # Run Streamlit on 8000 (external) and backend API on 8001 (internal).
+        if is_databricks_app and not self.no_ui:
+            frontend_port = 8000
+            backend_port = 8001
+        else:
+            backend_port = self.port
+            frontend_port = int(os.environ.get("CHAT_APP_PORT", os.environ.get("PORT", "3000")))
+
+        if not self.no_ui:
+            os.environ["API_PROXY"] = f"http://localhost:{backend_port}/invocations"
 
         # Open log files
         self.backend_log = open("backend.log", "w", buffering=1)
@@ -202,7 +218,7 @@ class ProcessManager:
 
         try:
             # Build backend command, passing through all arguments
-            backend_cmd = ["uv", "run", "start-server"]
+            backend_cmd = ["uv", "run", "start-server", "--port", str(backend_port)]
             if backend_args:
                 backend_cmd.extend(backend_args)
 
@@ -212,7 +228,6 @@ class ProcessManager:
             )
 
             if not self.no_ui:
-                frontend_port = int(os.environ.get("CHAT_APP_PORT", os.environ.get("PORT", "3000")))
                 self.frontend_process = self.start_process(
                     [
                         "uv", "run", "streamlit", "run", "ui/app.py",

@@ -17,7 +17,6 @@ See 'uv run start-server --help' for available options.
 import argparse
 import os
 import re
-import shutil
 import socket
 import subprocess
 import sys
@@ -29,7 +28,7 @@ from dotenv import load_dotenv
 
 # Readiness patterns
 BACKEND_READY = [r"Uvicorn running on", r"Application startup complete", r"Started server process"]
-FRONTEND_READY = [r"Server is running on http://localhost"]
+FRONTEND_READY = [r"You can now view your Streamlit app", r"Network URL", r"Local URL"]
 
 
 def check_port_available(port: int) -> bool:
@@ -121,9 +120,11 @@ class ProcessManager:
                         print(f"✓ API available at http://localhost:{self.port}")
                         print("=" * 50 + "\n")
                     elif self.backend_ready and self.frontend_ready:
+                        frontend_port = int(os.environ.get("CHAT_APP_PORT", os.environ.get("PORT", "3000")))
                         print("\n" + "=" * 50)
                         print("✓ Both frontend and backend are ready!")
-                        print(f"✓ Open the frontend at http://localhost:{self.port}")
+                        print(f"✓ Open the UI at http://localhost:{frontend_port}")
+                        print(f"✓ API available at http://localhost:{self.port}")
                         print("=" * 50 + "\n")
 
             process.wait()
@@ -134,38 +135,12 @@ class ProcessManager:
             print(f"Error monitoring {name}: {e}")
             self.failed.set()
 
-    def clone_frontend_if_needed(self):
-        if Path("e2e-chatbot-app-next").exists():
-            return True
-
-        print("Cloning e2e-chatbot-app-next...")
-        for url in [
-            "https://github.com/databricks/app-templates.git",
-            "git@github.com:databricks/app-templates.git",
-        ]:
-            try:
-                subprocess.run(
-                    ["git", "clone", "--filter=blob:none", "--sparse", url, "temp-app-templates"],
-                    check=True,
-                    capture_output=True,
-                )
-                break
-            except subprocess.CalledProcessError:
-                continue
-        else:
-            print("ERROR: Failed to clone repository.")
-            print(
-                "Manually download from: https://download-directory.github.io/?url=https://github.com/databricks/app-templates/tree/main/e2e-chatbot-app-next"
-            )
+    def check_frontend_ready(self):
+        """Verify the Streamlit UI file exists."""
+        ui_path = Path("ui/app.py")
+        if not ui_path.exists():
+            print(f"ERROR: Streamlit UI not found at {ui_path}")
             return False
-
-        subprocess.run(
-            ["git", "sparse-checkout", "set", "e2e-chatbot-app-next"],
-            cwd="temp-app-templates",
-            check=True,
-        )
-        Path("temp-app-templates/e2e-chatbot-app-next").rename("e2e-chatbot-app-next")
-        shutil.rmtree("temp-app-templates", ignore_errors=True)
         return True
 
     def start_process(self, cmd, name, log_file, patterns, cwd=None):
@@ -214,11 +189,10 @@ class ProcessManager:
             self.check_ports()
 
         if not self.no_ui:
-            if not self.clone_frontend_if_needed():
-                print("WARNING: Failed to clone frontend. Continuing with backend only.")
+            if not self.check_frontend_ready():
+                print("WARNING: Streamlit UI not found. Continuing with backend only.")
                 self.no_ui = True
             else:
-                # Set API_PROXY environment variable for frontend to connect to backend
                 os.environ["API_PROXY"] = f"http://localhost:{self.port}/invocations"
 
         # Open log files
@@ -238,23 +212,18 @@ class ProcessManager:
             )
 
             if not self.no_ui:
-                # Setup and start frontend
-                frontend_dir = Path("e2e-chatbot-app-next")
-                for cmd, desc in [("npm install", "install"), ("npm run build", "build")]:
-                    print(f"Running npm {desc}...")
-                    result = subprocess.run(
-                        cmd.split(), cwd=frontend_dir, capture_output=True, text=True
-                    )
-                    if result.returncode != 0:
-                        print(f"npm {desc} failed: {result.stderr}")
-                        return 1
-
+                frontend_port = int(os.environ.get("CHAT_APP_PORT", os.environ.get("PORT", "3000")))
                 self.frontend_process = self.start_process(
-                    ["npm", "run", "start"],
+                    [
+                        "uv", "run", "streamlit", "run", "ui/app.py",
+                        "--server.port", str(frontend_port),
+                        "--server.headless", "true",
+                        "--server.address", "0.0.0.0",
+                        "--browser.gatherUsageStats", "false",
+                    ],
                     "frontend",
                     self.frontend_log,
                     FRONTEND_READY,
-                    cwd=frontend_dir,
                 )
 
                 print(

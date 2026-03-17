@@ -1,7 +1,7 @@
 [project]
 name = "agent-server"
 version = "0.1.0"
-description = "Multi-agent orchestrator that queries other agents, Genie spaces, and serving endpoints"
+description = "SEC Filing Information Extraction Agent — extracts structured business attributes from SEC filings"
 readme = "README.md"
 authors = [
     { name = "Agent Developer", email = "developer@example.com" }
@@ -15,6 +15,8 @@ dependencies = [
     "mlflow>=3.10.0",
     "openai-agents>=0.4.1",
     "python-dotenv>=1.2.1",
+    "duckduckgo-search>=7.0.0",
+    "streamlit>=1.40.0",
 ]
 
 [build-system]

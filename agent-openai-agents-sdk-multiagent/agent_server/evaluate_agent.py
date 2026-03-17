@@ -18,52 +18,50 @@ from mlflow.genai.scorers import (
 from mlflow.genai.simulators import ConversationSimulator
 from mlflow.types.responses import ResponsesAgentRequest
 
-# Load environment variables from .env if it exists
 load_dotenv(dotenv_path=".env", override=True)
 logging.getLogger("mlflow.utils.autologging_utils").setLevel(logging.ERROR)
 
-# need to import agent for our @invoke-registered function to be found
-from agent_server import agent  # noqa: F401
+from agent_server import agent  # noqa: F401, E402
 
-# Create your evaluation dataset
-# Refer to documentation for evaluations:
-# Scorers: https://docs.databricks.com/aws/en/mlflow3/genai/eval-monitor/concepts/scorers
-# Predefined LLM scorers: https://mlflow.org/docs/latest/genai/eval-monitor/scorers/llm-judge/predefined
-# Defining custom scorers: https://docs.databricks.com/aws/en/mlflow3/genai/eval-monitor/custom-scorers
 test_cases = [
     {
-        "goal": "Learn about the main dishes of Vietnamese cuisine",
-        "persona": "An impatient foodie who doesn't know much about Vietnamese cuisine.",
+        "goal": "Extract business attributes from a sample SEC 10-K filing",
+        "persona": "A data analyst who needs to enrich business records with SEC filing data.",
         "simulation_guidelines": [
-            "Initially explore the main influences of Vietnamese cuisine before the main dishes.",
+            "Provide a sample SEC filing text and ask the agent to extract all business attributes.",
+            "Ask follow-up questions about specific attributes like employee count or revenue.",
         ],
     },
     {
-        "goal": "Figure out which prime numbers between 1 and 50 are also Fibonacci numbers",
-        "persona": "You are a math novice who has heard of prime numbers but doesn't know what Fibonacci numbers are.",
+        "goal": "Determine if a company is a manufacturer based on its SEC filing description",
+        "persona": "A business researcher who needs to classify companies by industry type.",
         "simulation_guidelines": [
-            "Initially ask questions to understand the Fibonacci sequence before exploring which ones are prime.",
-            "Prefer short messages",
+            "Ask the agent to analyze a company description and determine if it is a manufacturer.",
+            "Ask for the evidence and reasoning behind the classification.",
+        ],
+    },
+    {
+        "goal": "Find the headquarters address and contact information for a company from SEC filings",
+        "persona": "A sales operations analyst building a contact database.",
+        "simulation_guidelines": [
+            "Ask the agent to find the company's address, phone number, and website.",
+            "Verify the extracted information is in a structured format.",
         ],
     },
 ]
 
 simulator = ConversationSimulator(
     test_cases=test_cases,
-    max_turns=5,
+    max_turns=4,
     user_model="databricks:/databricks-claude-sonnet-4-5",
 )
 
-# Get the invoke function that was registered via @invoke decorator in your agent
 invoke_fn = get_invoke_function()
 assert invoke_fn is not None, (
-    "No function registered with the `@invoke` decorator found."
+    "No function registered with the `@invoke` decorator found. "
     "Ensure you have a function decorated with `@invoke()`."
 )
 
-# if invoke function is async, wrap it in a sync function.
-# The simulator may already be running an event loop, so we use nest_asyncio
-# to allow nested run_until_complete() calls without deadlocking.
 if asyncio.iscoroutinefunction(invoke_fn):
     import nest_asyncio
 

@@ -219,18 +219,101 @@ def extract_response_text(data: dict) -> str:
     return "\n".join(texts) if texts else json.dumps(data, indent=2)
 
 
+def _agent_record_to_ui_format(record: dict, evaluation: dict | None = None) -> dict:
+    """Transform agent's BusinessRecord format to UI display format."""
+    ev = evaluation or {}
+    attrs: dict = {}
+
+    # Map agent fields to UI attribute format (value, confidence, source, evidence)
+    def make_attr(val, conf=0.9, src="llm_inference"):
+        return {"value": val, "confidence": conf, "source": src, "evidence": ""}
+
+    # Direct mappings
+    for field in (
+        "business_name", "parent_name", "business_phone", "industry_description",
+        "website_domain", "business_purpose_summary", "is_manufacturer",
+    ):
+        attrs[field] = make_attr(record.get(field))
+
+    # Combined address
+    addr_parts = [
+        record.get("address"),
+        record.get("city"),
+        record.get("state"),
+        record.get("zip_code"),
+    ]
+    addr_str = ", ".join(str(p) for p in addr_parts if p)
+    attrs["address_city_state_zip"] = make_attr(addr_str if addr_str else None)
+
+    # naics_sic_codes -> naics_sic_candidates
+    codes = record.get("naics_sic_codes") or []
+    attrs["naics_sic_candidates"] = make_attr(
+        ", ".join(str(c) for c in codes) if codes else None
+    )
+
+    # num_employees -> number_of_employees
+    attrs["number_of_employees"] = make_attr(record.get("num_employees"))
+
+    # List fields
+    risk = record.get("risk_factor_keywords") or []
+    attrs["risk_factor_keywords"] = make_attr(
+        ", ".join(str(r) for r in risk) if risk else None
+    )
+    rev = record.get("revenue_mentions") or []
+    attrs["revenue_mentions"] = make_attr(
+        ", ".join(str(r) for r in rev) if rev else None
+    )
+
+    conf = ev.get("confidence", 0.8)
+    for a in attrs.values():
+        if a.get("value") is not None and a.get("confidence", 0) == 0.9:
+            a["confidence"] = conf
+
+    is_open = record.get("is_open")
+    status = "open" if (is_open is None or is_open) else "closed"
+    reasoning = "; ".join(ev.get("issues", [])) or "Extracted from SEC filing"
+
+    return {
+        "company_name": record.get("business_name") or "Unknown Company",
+        "filing_type": "Unknown",
+        "attributes": attrs,
+        "business_status": status,
+        "status_reasoning": reasoning,
+    }
+
+
 def parse_extraction_json(text: str) -> dict | None:
-    """Extract the JSON block from the agent's markdown-wrapped response."""
-    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    """Extract the JSON block from the agent's markdown-wrapped response and normalize to UI format."""
+    # Extract content between ```json and ``` (handles nested JSON)
+    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
     if match:
+        raw = match.group(1).strip()
         try:
-            return json.loads(match.group(1))
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                # Agent returns record; may be wrapped in {"record": ..., "evaluation": ...}
+                record = parsed.get("record", parsed)
+                evaluation = parsed.get("evaluation") if "evaluation" in parsed else None
+                if record.get("business_name") is not None or any(
+                    k in record for k in ("business_phone", "industry_description", "website_domain")
+                ):
+                    return _agent_record_to_ui_format(record, evaluation)
+                return parsed
         except json.JSONDecodeError:
             pass
     try:
-        return json.loads(text)
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            record = parsed.get("record", parsed)
+            evaluation = parsed.get("evaluation") if "evaluation" in parsed else None
+            if record.get("business_name") is not None or any(
+                k in record for k in ("business_phone", "industry_description", "website_domain")
+            ):
+                return _agent_record_to_ui_format(record, evaluation)
+            return parsed
     except (json.JSONDecodeError, TypeError):
-        return None
+        pass
+    return None
 
 
 def confidence_class(score: float) -> str:

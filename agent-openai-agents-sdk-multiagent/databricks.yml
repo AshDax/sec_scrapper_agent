@@ -26,7 +26,7 @@ resources:
       resources:
         - name: 'experiment'
           experiment:
-            experiment_id: "2932940041946641"
+            experiment_id: "2932940041946963"
             permission: 'CAN_MANAGE'
 
         # NOTE: Vector search index, embedding endpoint, and search endpoint

@@ -1,7 +1,7 @@
 [project]
 name = "agent-server"
 version = "0.1.0"
-description = "SEC Filing Information Extraction Agent — extracts structured business attributes from SEC filings"
+description = "SEC Filing Information Extraction Agent — LangChain + LangGraph multi-agent pipeline"
 readme = "README.md"
 authors = [
     { name = "Agent Developer", email = "developer@example.com" }
@@ -10,13 +10,16 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.129.0",
     "uvicorn>=0.41.0",
-    "databricks-openai>=0.13.0",
     "databricks-agents>=1.9.3",
     "mlflow>=3.10.0",
-    "openai-agents>=0.4.1",
     "python-dotenv>=1.2.1",
     "duckduckgo-search>=7.0.0",
     "streamlit>=1.40.0",
+    # LangChain ecosystem
+    "langchain-core>=0.3.0",
+    "langchain>=0.3.0",
+    "langchain-openai>=0.3.0",
+    "langgraph>=0.3.0",
 ]
 
 [build-system]
@@ -37,3 +40,4 @@ start-app = "scripts.start_app:main"
 start-server = "agent_server.start_server:main"
 agent-evaluate = "agent_server.evaluate_agent:evaluate"
 discover-tools = "scripts.discover_tools:main"
+run-sec-extraction = "agent_server.sec_extraction.scripts:main"

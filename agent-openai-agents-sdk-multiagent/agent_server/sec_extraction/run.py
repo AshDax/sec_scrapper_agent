@@ -1,0 +1,125 @@
+"""Batch runner — process documents with optional MLflow logging and Delta write.
+
+Usage:
+    from agent_server.sec_extraction.run import run_extraction
+
+    results = run_extraction(
+        documents=["filing1...", "filing2..."],
+        use_mlflow=True,
+        delta_table="catalog.schema.business_records",
+    )
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from typing import Any
+
+from agent_server.sec_extraction.config import ExtractionConfig, get_config
+from agent_server.sec_extraction.workflow import extraction_workflow
+
+logger = logging.getLogger(__name__)
+
+
+def run_extraction(
+    documents: list[str],
+    config: ExtractionConfig | None = None,
+    use_mlflow: bool = True,
+    delta_table: str | None = None,
+) -> list[dict[str, Any]]:
+    """Run the extraction pipeline on a batch of documents.
+
+    Args:
+        documents:   List of raw SEC filing texts.
+        config:      Pipeline config (uses env-based defaults if None).
+        use_mlflow:  Whether to log metrics/artifacts to MLflow.
+        delta_table: Optional Delta table name to write results to.
+
+    Returns:
+        List of result dicts, each with 'record' and 'evaluation'.
+    """
+    cfg = config or get_config()
+    delta_table = delta_table or cfg.delta_table
+    results: list[dict[str, Any]] = []
+
+    mlflow_run = None
+    if use_mlflow:
+        try:
+            import mlflow
+
+            mlflow_run = mlflow.start_run(run_name="sec-extraction-batch")
+        except Exception as exc:
+            logger.warning("MLflow not available: %s", exc)
+            use_mlflow = False
+
+    total_fill = 0.0
+    successful = 0
+
+    for i, doc in enumerate(documents):
+        t0 = time.time()
+        logger.info("Processing document %d/%d ...", i + 1, len(documents))
+
+        try:
+            result = extraction_workflow(doc, cfg)
+            elapsed = time.time() - t0
+
+            fill_rate = result.get("fill_rate", 0)
+            total_fill += fill_rate
+            if result.get("evaluation", {}).get("valid", False):
+                successful += 1
+
+            result["processing_time_s"] = round(elapsed, 2)
+            results.append(result)
+
+            if use_mlflow:
+                import mlflow
+
+                mlflow.log_metric(f"fill_rate_doc_{i}", fill_rate)
+                mlflow.log_metric(f"confidence_doc_{i}",
+                                  result.get("evaluation", {}).get("confidence", 0))
+                mlflow.log_metric(f"processing_time_s_doc_{i}", elapsed)
+
+        except Exception as exc:
+            logger.error("Document %d failed: %s", i, exc)
+            results.append({"error": str(exc), "record": {}, "evaluation": {}})
+
+    if use_mlflow and mlflow_run:
+        import mlflow
+
+        mlflow.log_metric("avg_fill_rate", total_fill / max(len(documents), 1))
+        mlflow.log_metric("successful_extractions", successful)
+        mlflow.log_metric("total_documents", len(documents))
+
+        mlflow.log_text(
+            json.dumps([r.get("record", {}) for r in results], indent=2, default=str),
+            "extraction_results.json",
+        )
+        mlflow.end_run()
+
+    if delta_table:
+        _write_to_delta(results, delta_table)
+
+    return results
+
+
+def _write_to_delta(results: list[dict], table_name: str):
+    """Write BusinessRecord dicts to a Delta table via Spark."""
+    try:
+        from pyspark.sql import SparkSession
+
+        spark = SparkSession.builder.getOrCreate()
+        records = [r.get("record", {}) for r in results if r.get("record")]
+        if not records:
+            logger.warning("No records to write to Delta table")
+            return
+
+        df = spark.createDataFrame(records)
+        df.write.mode("append").saveAsTable(table_name)
+        logger.info("Wrote %d records to %s", len(records), table_name)
+
+    except ImportError:
+        logger.warning("PySpark not available — skipping Delta write. Install pyspark to enable.")
+    except Exception as exc:
+        logger.error("Delta write failed: %s", exc)

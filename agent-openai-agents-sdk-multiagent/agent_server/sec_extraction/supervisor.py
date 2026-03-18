@@ -28,6 +28,7 @@ from agent_server.sec_extraction.tools.enrichment import enrich_record
 from agent_server.sec_extraction.tools.evaluate import compute_fill_rate, evaluate_record
 from agent_server.sec_extraction.tools.llm_extract import llm_extract_record
 from agent_server.sec_extraction.tools.scraper import scrape_attributes
+from agent_server.sec_extraction.tools.section_filtering import filter_sections
 from agent_server.sec_extraction.tools.text_extraction import extract_text
 from agent_server.sec_extraction.tools.web_search import web_search
 
@@ -50,6 +51,11 @@ def regex_scrape(text: str) -> str:
     result = scrape_attributes(text)
     return json.dumps(result, indent=2)
 
+@tool
+def filter_sections(text: str) -> str:
+    """Filters useful sections from a SEC 10-K filing which probably contain extractable features."""
+    result = filter_sections(text)
+    return json.dumps(result, indent=2)
 
 @tool
 def vector_search(query: str) -> str:
@@ -107,7 +113,7 @@ def search_web(query: str) -> str:
 
 
 SUPERVISOR_TOOLS = [
-    clean_text, regex_scrape, vector_search,
+    clean_text, regex_scrape, filter_sections, vector_search,
     extract_with_llm, enrich, evaluate, search_web,
 ]
 

@@ -37,6 +37,7 @@ from agent_server.sec_extraction.tools.llm_extract import llm_extract_record
 from agent_server.sec_extraction.tools.scraper import scrape_attributes
 from agent_server.sec_extraction.tools.text_extraction import extract_text
 from agent_server.sec_extraction.tools.web_search import web_search
+from agent_server.sec_extraction.tools.mlflow_logger import reset_logger, get_logger, end_logger
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ def text_extract_node(state: dict, config: RunnableConfig | None = None) -> dict
 def scraper_node(state: dict, config: RunnableConfig | None = None) -> dict:
     text = state.get("raw_text", "")
     result = scrape_attributes(text)
+    get_logger().log_scraper(result)
     logger.info("scraper: found %d fields via regex", len(result))
     return {"scraper_result": result, "clean_text": text}
 
@@ -75,6 +77,7 @@ def llm_extract_node(state: dict, config: RunnableConfig | None = None) -> dict:
         context_chunks=[],
         config=ext_config,
     )
+    get_logger().log_llm_call(step="llm_extract", input_chars=len(clean))
     logger.info("llm_extract: produced record with %d non-null fields",
                 sum(1 for v in record.values() if v is not None and v != []))
     return {"record": record}
@@ -100,6 +103,7 @@ def evaluate_node(state: dict, config: RunnableConfig | None = None) -> dict:
         source_text=source_text,
         config=ext_config,
     )
+    get_logger().log_evaluation(evaluation)
     logger.info("evaluate: fill_rate=%.2f, valid=%s",
                 evaluation.get("fill_rate", 0), evaluation.get("valid"))
     return {
@@ -134,7 +138,10 @@ def re_evaluate_node(state: dict, config: RunnableConfig | None = None) -> dict:
         source_text=state.get("clean_text", ""),
         config=ext_config,
     )
+    get_logger().log_evaluation(evaluation)
+    get_logger().log_final_record(state.get("record", {}))
     logger.info("re_evaluate: fill_rate=%.2f (after web fallback)", evaluation.get("fill_rate", 0))
+    end_logger()
     return {
         "evaluation": evaluation,
         "fill_rate": evaluation.get("fill_rate", 0),
@@ -220,6 +227,7 @@ def extraction_workflow(
         Dict with keys: record, evaluation, fill_rate, and more.
     """
     cfg = config or get_config()
+    reset_logger(company="unknown")
     workflow = build_extraction_workflow(cfg)
 
     initial_state = {

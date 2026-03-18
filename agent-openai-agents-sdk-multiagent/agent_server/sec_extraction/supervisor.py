@@ -31,6 +31,8 @@ from agent_server.sec_extraction.tools.scraper import scrape_attributes
 from agent_server.sec_extraction.tools.section_filtering import filter_sections
 from agent_server.sec_extraction.tools.text_extraction import extract_text
 from agent_server.sec_extraction.tools.web_search import web_search
+from agent_server.sec_extraction.tools.mlflow_logger import reset_logger, get_logger, end_logger
+
 
 # ---------------------------------------------------------------------------
 # Tools (wrapped for LangChain tool interface)
@@ -42,6 +44,7 @@ _config_ref: ExtractionConfig | None = None
 @tool
 def clean_text(raw_text: str) -> str:
     """Parse raw SEC filing text/HTML into clean plaintext."""
+    get_logger().log_input(raw_text)
     return extract_text(raw_text)
 
 
@@ -49,12 +52,14 @@ def clean_text(raw_text: str) -> str:
 def regex_scrape(text: str) -> str:
     """Extract attributes using regex patterns. Returns JSON dict of found fields."""
     result = scrape_attributes(text)
+    get_logger().log_scraper(result)
     return json.dumps(result, indent=2)
 
 @tool
 def filter_sections(text: str) -> str:
     """Filters useful sections from a SEC 10-K filing which probably contain extractable features."""
     result = filter_sections(text)
+    get_logger().log_sections(result, sections_kept=result.count("=== Item"))
     return json.dumps(result, indent=2)
 
 @tool
@@ -76,6 +81,7 @@ def extract_with_llm(text: str, scraper_hints: str, context: str) -> str:
         hints = {}
     chunks = context.split("\n---\n") if context else []
     record = llm_extract_record(text[:8000], hints, chunks, cfg)
+    get_logger().log_llm_call(step="llm_extract", input_chars=len(text))
     return json.dumps(record, indent=2)
 
 
@@ -100,6 +106,9 @@ def evaluate(record_json: str, source_text: str) -> str:
     except json.JSONDecodeError:
         return json.dumps({"valid": False, "fill_rate": 0, "issues": ["Invalid JSON"]})
     result = evaluate_record(record, source_text, cfg)
+    get_logger().log_evaluation(result)
+    get_logger().log_final_record(record)
+    end_logger()
     return json.dumps(result, indent=2)
 
 
@@ -109,6 +118,7 @@ def search_web(query: str) -> str:
     from agent_server.sec_extraction.config import get_config
     cfg = _config_ref or get_config()
     snippets = web_search(query, cfg)
+    get_logger().log_web_search(query=query, results_count=len(snippets))
     return "\n---\n".join(snippets) if snippets else "No results found."
 
 
@@ -148,6 +158,7 @@ def build_supervisor(config: ExtractionConfig | None = None):
     _config_ref = cfg
 
     llm = cfg.get_llm(temperature=0)
+    reset_logger(company="unknown")
 
     return create_react_agent(
         model=llm,

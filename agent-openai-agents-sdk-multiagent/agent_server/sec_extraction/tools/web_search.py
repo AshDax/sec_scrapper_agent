@@ -8,17 +8,21 @@ Usage:
     from agent_server.sec_extraction.tools.web_search import web_search
     snippets = web_search("Pinnacle Manufacturing Corp employees revenue")
 """
+%pip install google-search-results
+%pip install transformers torch duckduckgo-search
+%pip install duckduckgo-search --upgrade
 
 from __future__ import annotations
-
+from serpapi import GoogleSearch
+from typing import List, Dict
 import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from agent_server.sec_extraction.config import ExtractionConfig
 
-logger = logging.getLogger(__name__)
-
+logger = logging.getLogger("web_search")
+logger.setLevel(logging.INFO)
 
 def web_search(query: str, config: ExtractionConfig | None = None) -> list[str]:
     """Search the web and return text snippets.
@@ -37,43 +41,69 @@ def web_search(query: str, config: ExtractionConfig | None = None) -> list[str]:
     return _ddg_search(query)
 
 
-def _ddg_search(query: str) -> list[str]:
+def _ddg_search(query: str, max_results=5) -> list[str]:
+    """
+    Performs a DuckDuckGo search and returns a list of text results.
+
+    Args:
+        query (str): The search query.
+        max_results (int): Max number of search results to return.
+
+    Returns:
+        List[str]: List of "title: body" strings.
+    """
     try:
         from duckduckgo_search import DDGS
 
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=5))
 
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+
+        # Filter out results without body
         return [
             f"{r.get('title', '')}: {r.get('body', '')}"
             for r in results
             if r.get("body")
         ]
+
     except Exception as exc:
         logger.warning("DuckDuckGo search failed: %s", exc)
         return []
 
 
-def _serper_search(query: str, api_key: str) -> list[str]:
+def _serper_search(query: str, api_key: str, engine: str = "google", num_results: int = 5) -> list[str]:
+    """
+    Perform web search using SerpAPI and return structured results.
+    Fully self-contained and safe.
+    """
     try:
-        import requests
+        # Step 1: Build parameters
+        params = {
+            "q": query,
+            "engine": engine,
+            "num": num_results,
+            "api_key": api_key
+        }
 
-        resp = requests.post(
-            "https://google.serper.dev/search",
-            json={"q": query, "num": 5},
-            headers={"X-API-KEY": api_key},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        # Step 2: Execute search
+        search = GoogleSearch(params)
+        raw_response = search.get_dict()
 
-        snippets = []
-        for item in data.get("organic", []):
-            title = item.get("title", "")
-            snippet = item.get("snippet", "")
-            if snippet:
-                snippets.append(f"{title}: {snippet}")
-        return snippets[:5]
+        # Debug (optional)
+        # print(raw_response)
+
+        # Step 3: Parse results safely
+        results = raw_response.get("organic_results", [])
+
+        parsed_results = []
+        for r in results:
+            parsed_results.append({
+                "title": r.get("title", ""),
+                "snippet": r.get("snippet", ""),
+                "link": r.get("link", "")
+            })
+
+        return parsed_results
 
     except Exception as exc:
         logger.warning("Serper search failed: %s — falling back to DuckDuckGo", exc)

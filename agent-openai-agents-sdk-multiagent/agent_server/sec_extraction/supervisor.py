@@ -69,7 +69,7 @@ def extract_with_llm(text: str, scraper_hints: str, context: str) -> str:
     except json.JSONDecodeError:
         hints = {}
     chunks = context.split("\n---\n") if context else []
-    record = llm_extract_record(text[:8000], hints, chunks, cfg)
+    record, _ = llm_extract_record(text[:8000], hints, chunks, cfg)
     return json.dumps(record, indent=2)
 
 

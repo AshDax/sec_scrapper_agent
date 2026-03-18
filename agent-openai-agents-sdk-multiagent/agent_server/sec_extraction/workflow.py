@@ -50,6 +50,7 @@ class WorkflowState(TypedDict, total=False):
     clean_text: str
     scraper_result: dict
     record: dict
+    llm_record: dict
     evaluation: dict
     fill_rate: float
     web_context: list
@@ -76,15 +77,16 @@ def llm_extract_node(state: WorkflowState, config: RunnableConfig | None = None)
         if raw and raw.strip():
             clean = extract_text(raw[:200_000])[:12000]
             logger.warning("clean_text was empty; used fallback from raw_text (%d chars)", len(clean))
-    record = llm_extract_record(
+    record, llm_record = llm_extract_record(
         text=clean,
         scraper_result=state.get("scraper_result", {}),
         context_chunks=[],
         config=ext_config,
     )
-    logger.info("llm_extract: produced record with %d non-null fields",
-                sum(1 for v in record.values() if v is not None and v != []))
-    return {"record": record}
+    logger.info("llm_extract: produced record with %d non-null fields (%d from LLM)",
+                sum(1 for v in record.values() if v is not None and v != []),
+                sum(1 for v in llm_record.values() if v is not None and v != [] and v != ""))
+    return {"record": record, "llm_record": llm_record}
 
 
 def enrichment_node(state: WorkflowState, config: RunnableConfig | None = None) -> dict:
@@ -106,9 +108,11 @@ def evaluate_node(state: WorkflowState, config: RunnableConfig | None = None) ->
         record_dict=state.get("record", {}),
         source_text=source_text,
         config=ext_config,
+        llm_record=state.get("llm_record"),
     )
-    logger.info("evaluate: fill_rate=%.2f, valid=%s",
-                evaluation.get("fill_rate", 0), evaluation.get("valid"))
+    logger.info("evaluate: fill_rate=%.2f, valid=%s, llm_fields=%d",
+                evaluation.get("fill_rate", 0), evaluation.get("valid"),
+                len(evaluation.get("llm_filled_fields", [])))
     return {
         "evaluation": evaluation,
         "fill_rate": evaluation.get("fill_rate", 0),
@@ -132,14 +136,14 @@ def web_fallback_node(state: WorkflowState, config: RunnableConfig | None = None
     snippets = web_search(query, ext_config)
     logger.info("web_fallback: got %d snippets for '%s'", len(snippets), query[:60])
 
-    record = llm_extract_record(
+    record, llm_record = llm_extract_record(
         text=state.get("clean_text", ""),
         scraper_result=state.get("scraper_result", {}),
         context_chunks=snippets,
         config=ext_config,
     )
     enriched = enrich_record(record, state.get("clean_text", ""))
-    return {"record": enriched, "web_context": snippets, "iteration": 1}
+    return {"record": enriched, "llm_record": llm_record, "web_context": snippets, "iteration": 1}
 
 
 def re_evaluate_node(state: WorkflowState, config: RunnableConfig | None = None) -> dict:
@@ -148,6 +152,7 @@ def re_evaluate_node(state: WorkflowState, config: RunnableConfig | None = None)
         record_dict=state.get("record", {}),
         source_text=state.get("clean_text", ""),
         config=ext_config,
+        llm_record=state.get("llm_record"),
     )
     logger.info("re_evaluate: fill_rate=%.2f (after web fallback)", evaluation.get("fill_rate", 0))
     return {

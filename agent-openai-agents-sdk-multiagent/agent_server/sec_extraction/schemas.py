@@ -74,6 +74,9 @@ class EvaluationResult(BaseModel):
     filled_fields: list[str] = Field(default_factory=list)
     missing_fields: list[str] = Field(default_factory=list)
     issues: list[str] = Field(default_factory=list)
+    # Results that came specifically from the LLM (before scraper/enrichment fill)
+    llm_filled_fields: list[str] = Field(default_factory=list)
+    llm_record: dict = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

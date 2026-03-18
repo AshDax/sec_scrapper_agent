@@ -28,31 +28,47 @@ from agent_server.sec_extraction.attribute_registry import get_registry
 
 logger = logging.getLogger(__name__)
 
+SEC_EXTRACTABLE_ATTRS = [
+    "company_name", "company_legal_name", "company_ein", "cik",
+    "company_address", "company_city", "company_state", "company_postal_code",
+    "company_phone", "website",
+    "name", "street", "city", "state", "postal_code", "phone",
+    "primary_sic_code_id", "primary_naics_code_id",
+    "company_sic_code", "company_sic_name", "company_naics_code", "company_naics_name",
+    "location_employee_count", "corporate_employee_count",
+    "revenue", "net_income", "gross_profit", "cost_of_revenue",
+    "total_assets", "total_liabilities_and_equity",
+    "operating_expenses", "operating_income",
+    "cash", "current_assets", "shareholders_equity",
+    "long_term_debt", "short_term_debt", "total_debt",
+    "stock_ticker_symbol", "stock_exchange_code",
+    "report_date", "fiscal_year_end_month",
+    "company_year_founded", "company_description",
+    "in_business", "company_active_indicator",
+]
+
 
 def _build_system_prompt() -> str:
-    """Build the LLM system prompt from the attribute registry."""
+    """Compact system prompt — only SEC-extractable fields to stay within token limits."""
     registry = get_registry()
-    schema_block = registry.get_json_schema_block()
-    desc_block = registry.get_descriptions_block()
+    extractable = set(SEC_EXTRACTABLE_ATTRS)
+    attrs = [a for a in registry.attributes if a["attribute"] in extractable]
 
-    return f"""You are a precise SEC filing and business data extractor. Given the filing
-text and any supplementary context, extract ALL of the following fields.
+    schema_lines = ["{"]
+    for i, attr in enumerate(attrs):
+        comma = "," if i < len(attrs) - 1 else ""
+        schema_lines.append(f'  "{attr["attribute"]}": {attr["json_type"]}{comma}')
+    schema_lines.append("}")
+    schema_block = "\n".join(schema_lines)
 
-Return ONLY valid JSON matching this schema (no markdown fences, no commentary):
-
-{schema_block}
-
-Attribute descriptions:
-{desc_block}
-
-Rules:
-- Keep original values from the document (don't invent data).
-- For boolean fields (in_business, is_manufacturer, etc.), infer from context.
-- For is_open/in_business, look for: dissolution, bankruptcy, ceased operations, wound down.
-  Default to true if no closure evidence.
-- For revenue/financial fields, include numeric values when present.
-- For array fields, use empty list [] when no values found.
-"""
+    return (
+        "You are an SEC filing data extractor. "
+        "Return ONLY valid JSON (no markdown, no commentary) matching this schema:\n\n"
+        f"{schema_block}\n\n"
+        "Rules: use document values only; null for missing fields; "
+        "boolean fields default true unless closure/dissolution evidence; "
+        "numeric financial values should be raw numbers (not formatted strings)."
+    )
 
 
 def llm_extract_record(
@@ -76,20 +92,21 @@ def llm_extract_record(
 
     context_block = ""
     if context_chunks:
-        context_block = "\n\n--- Supplementary Context ---\n" + "\n---\n".join(context_chunks)
+        joined = "\n---\n".join(c[:500] for c in context_chunks[:3])
+        context_block = f"\n\n[Context]\n{joined}"
 
     scraper_block = ""
     if scraper_result:
-        scraper_block = (
-            "\n\n--- Scraper hints (regex matches — may need refinement) ---\n"
-            + json.dumps(scraper_result, indent=2)
-        )
+        extractable = set(SEC_EXTRACTABLE_ATTRS)
+        relevant_hints = {k: v for k, v in scraper_result.items() if k in extractable}
+        if relevant_hints:
+            scraper_block = "\n\n[Hints]\n" + json.dumps(relevant_hints, separators=(",", ":"))
 
     user_content = (
-        f"SEC Filing Text:\n{text[:12000]}"
+        f"[Filing]\n{text[:4000]}"
         f"{context_block}"
         f"{scraper_block}"
-        "\n\nExtract all fields now."
+        "\n\nExtract now."
     )
 
     try:

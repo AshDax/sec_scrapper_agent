@@ -21,7 +21,7 @@ class ExtractionConfig:
     def __init__(self):
         # LLM
         self.llm_model: str = os.environ.get(
-            "SEC_EXTRACTION_LLM_MODEL", "databricks-claude-sonnet-4-5"
+            "SEC_EXTRACTION_LLM_MODEL", "openai/gpt-oss-120b"
         )
         self.groq_api_key: str | None = os.environ.get("GROQ_API_KEY")
         self.openai_api_base: str | None = os.environ.get("OPENAI_API_BASE")

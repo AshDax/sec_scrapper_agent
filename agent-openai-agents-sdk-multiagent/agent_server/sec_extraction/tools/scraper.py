@@ -199,23 +199,55 @@ def _parse_xbrl(content: str) -> dict:
 # Output: partial dict — only fields with values, same as original scraper
 # ---------------------------------------------------------------------------
 
+SCRAPER_TO_REGISTRY: dict[str, str] = {
+    "sic_code": "primary_sic_code_id",
+    "sic_description": "company_sic_name",
+    "trading_symbol": "stock_ticker_symbol",
+    "stock_exchange": "stock_exchange_code",
+    "period_of_report": "report_date",
+    "filing_date": "report_date",
+    "total_liabilities_equity": "total_liabilities_and_equity",
+    "cash_end_of_period": "cash",
+    "retained_earnings": "shareholders_equity",
+    "fiscal_year_end": "fiscal_year_end_month",
+    "income_tax_expense": "tax_and_interest",
+    "location_employee_count": "location_employee_count",
+}
+
+COPY_TO_COMPANY: dict[str, str] = {
+    "street": "company_address",
+    "city": "company_city",
+    "state": "company_state",
+    "postal_code": "company_postal_code",
+    "phone": "company_phone",
+    "location_employee_count": "corporate_employee_count",
+}
+
+
 def scrape_attributes(text: str) -> dict:
     """Run SEC header + XBRL extraction against *text*.
 
     Returns only the fields that had at least one match.
+    Keys are mapped to registry-compatible attribute names.
     Downstream steps fill in whatever is missing.
 
     Priority: XBRL values take precedence over SEC header values
     when both are present — XBRL is more precisely typed.
     """
-    result: dict = {}
+    raw: dict = {}
 
-    # layer 1 — SEC header (fast, always present)
     header_data = _parse_sec_header(text)
-    result.update({k: v for k, v in header_data.items() if v is not None})
+    raw.update({k: v for k, v in header_data.items() if v is not None})
 
-    # layer 2 — XBRL tags (more precise, overwrites header where both exist)
     xbrl_data = _parse_xbrl(text)
-    result.update({k: v for k, v in xbrl_data.items() if v is not None})
+    raw.update({k: v for k, v in xbrl_data.items() if v is not None})
+
+    result: dict = {}
+    for k, v in raw.items():
+        registry_key = SCRAPER_TO_REGISTRY.get(k, k)
+        result.setdefault(registry_key, v)
+
+        if k in COPY_TO_COMPANY:
+            result.setdefault(COPY_TO_COMPANY[k], v)
 
     return result

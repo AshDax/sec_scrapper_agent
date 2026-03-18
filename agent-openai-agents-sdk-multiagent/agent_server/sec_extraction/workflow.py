@@ -1,18 +1,18 @@
 """LangGraph Workflow — the core extraction pipeline.
 
 Nodes:
-  text_extract → scraper → llm_extract → enrichment → evaluate
-                                                                      │
-                                                            fill_rate < threshold?
-                                                            ┌─────┴─────┐
-                                                            ▼           ▼
-                                                       web_fallback    END
-                                                            │
-                                                            ▼
-                                                       re_evaluate
-                                                            │
-                                                            ▼
-                                                           END
+  scraper → llm_extract → enrichment → evaluate
+                                                │
+                                      fill_rate < threshold?
+                                      ┌─────┴─────┐
+                                      ▼           ▼
+                                 web_fallback    END
+                                      │
+                                      ▼
+                                 re_evaluate
+                                      │
+                                      ▼
+                                     END
 
 Usage:
     from agent_server.sec_extraction.workflow import extraction_workflow
@@ -24,13 +24,12 @@ Usage:
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, TypedDict
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, StateGraph
 
 from agent_server.sec_extraction.config import ExtractionConfig, get_config
-from agent_server.sec_extraction.schemas import ExtractionState
 from agent_server.sec_extraction.tools.enrichment import enrich_record
 from agent_server.sec_extraction.tools.evaluate import evaluate_record
 from agent_server.sec_extraction.tools.llm_extract import llm_extract_record
@@ -40,30 +39,38 @@ from agent_server.sec_extraction.tools.web_search import web_search
 
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Typed state — LangGraph needs this to preserve all keys across nodes
+# ---------------------------------------------------------------------------
+
+
+class WorkflowState(TypedDict, total=False):
+    raw_text: str
+    clean_text: str
+    scraper_result: dict
+    record: dict
+    evaluation: dict
+    fill_rate: float
+    web_context: list
+    iteration: int
+
+
 # ---------------------------------------------------------------------------
 # Node functions — each returns a partial state update dict
 # ---------------------------------------------------------------------------
 
 
-def text_extract_node(state: dict, config: RunnableConfig | None = None) -> dict:
-    raw = state.get("raw_text", "")
-    # Pass-through: skip HTML/structure cleaning, use input directly for scraper
-    clean = raw
-    logger.info("text_extract: pass-through %d chars (no extraction)", len(clean))
-    return {"clean_text": clean}
-
-
-def scraper_node(state: dict, config: RunnableConfig | None = None) -> dict:
+def scraper_node(state: WorkflowState, config: RunnableConfig | None = None) -> dict:
     text = state.get("raw_text", "")
     result = scrape_attributes(text)
     logger.info("scraper: found %d fields via regex", len(result))
     return {"scraper_result": result, "clean_text": text}
 
 
-def llm_extract_node(state: dict, config: RunnableConfig | None = None) -> dict:
+def llm_extract_node(state: WorkflowState, config: RunnableConfig | None = None) -> dict:
     ext_config = _get_ext_config(config)
     clean = state.get("clean_text", "")
-    # Fallback: if no cleaned text (e.g. API sent empty body or extract failed), use raw so LLM gets content
     if not (clean and clean.strip()):
         raw = state.get("raw_text", "")
         if raw and raw.strip():
@@ -80,7 +87,7 @@ def llm_extract_node(state: dict, config: RunnableConfig | None = None) -> dict:
     return {"record": record}
 
 
-def enrichment_node(state: dict, config: RunnableConfig | None = None) -> dict:
+def enrichment_node(state: WorkflowState, config: RunnableConfig | None = None) -> dict:
     record = dict(state.get("record", {}))
     enriched = enrich_record(record, state.get("clean_text", ""))
     logger.info("enrichment: is_manufacturer=%s, is_open=%s",
@@ -88,7 +95,7 @@ def enrichment_node(state: dict, config: RunnableConfig | None = None) -> dict:
     return {"record": enriched}
 
 
-def evaluate_node(state: dict, config: RunnableConfig | None = None) -> dict:
+def evaluate_node(state: WorkflowState, config: RunnableConfig | None = None) -> dict:
     ext_config = _get_ext_config(config)
     source_text = state.get("clean_text", "")
     if not (source_text and source_text.strip()):
@@ -108,12 +115,20 @@ def evaluate_node(state: dict, config: RunnableConfig | None = None) -> dict:
     }
 
 
-def web_fallback_node(state: dict, config: RunnableConfig | None = None) -> dict:
+SEARCHABLE_FIELDS = {
+    "company_name", "company_address", "company_phone", "revenue",
+    "net_income", "total_assets", "location_employee_count",
+    "primary_sic_code_id", "company_description", "website",
+}
+
+
+def web_fallback_node(state: WorkflowState, config: RunnableConfig | None = None) -> dict:
     ext_config = _get_ext_config(config)
     record = state.get("record", {})
-    name = record.get("name") or record.get("company_name") or ""
+    name = record.get("company_name") or record.get("name") or ""
     missing = state.get("evaluation", {}).get("missing_fields", [])
-    query = f"{name} {' '.join(missing[:3])} SEC filing"
+    useful_missing = [f for f in missing if f in SEARCHABLE_FIELDS][:3]
+    query = f"{name} {' '.join(useful_missing)} SEC filing" if useful_missing else f"{name} SEC filing 10-K"
     snippets = web_search(query, ext_config)
     logger.info("web_fallback: got %d snippets for '%s'", len(snippets), query[:60])
 
@@ -127,7 +142,7 @@ def web_fallback_node(state: dict, config: RunnableConfig | None = None) -> dict
     return {"record": enriched, "web_context": snippets, "iteration": 1}
 
 
-def re_evaluate_node(state: dict, config: RunnableConfig | None = None) -> dict:
+def re_evaluate_node(state: WorkflowState, config: RunnableConfig | None = None) -> dict:
     ext_config = _get_ext_config(config)
     evaluation = evaluate_record(
         record_dict=state.get("record", {}),
@@ -146,11 +161,11 @@ def re_evaluate_node(state: dict, config: RunnableConfig | None = None) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def should_fallback(state: dict) -> str:
+def should_fallback(state: WorkflowState) -> str:
     """Route to web_fallback if fill rate is below threshold and we haven't tried yet."""
     fill_rate = state.get("fill_rate", 0)
     iteration = state.get("iteration", 0)
-    threshold = 0.5  # overridden at runtime via config if needed
+    threshold = 0.5
 
     if fill_rate < threshold and iteration < 1:
         return "web_fallback"
@@ -172,11 +187,8 @@ def _get_ext_config(config: RunnableConfig | None) -> ExtractionConfig:
 
 
 def build_extraction_workflow(ext_config: ExtractionConfig | None = None) -> Any:
-    """Compile the LangGraph extraction pipeline.
-
-    Returns a compiled StateGraph that accepts ExtractionState.
-    """
-    graph = StateGraph(dict)
+    """Compile the LangGraph extraction pipeline."""
+    graph = StateGraph(WorkflowState)
 
     graph.add_node("scraper", scraper_node)
     graph.add_node("llm_extract", llm_extract_node)
@@ -212,17 +224,13 @@ def extraction_workflow(
 ) -> dict:
     """Run the full extraction pipeline on a single document.
 
-    Args:
-        document: Raw SEC filing text or HTML.
-        config:   Pipeline configuration (uses defaults if None).
-
-    Returns:
-        Dict with keys: record, evaluation, fill_rate, and more.
+    Returns dict with: record, scraper_result, evaluation, fill_rate,
+    and extra_attributes (scraper fields not in the registry).
     """
     cfg = config or get_config()
     workflow = build_extraction_workflow(cfg)
 
-    initial_state = {
+    initial_state: WorkflowState = {
         "raw_text": document,
         "clean_text": "",
         "scraper_result": {},
@@ -237,4 +245,19 @@ def extraction_workflow(
         initial_state,
         config={"configurable": {"ext_config": cfg}},
     )
-    return result
+
+    from agent_server.sec_extraction.attribute_registry import get_registry
+    registry_keys = set(get_registry().attribute_names)
+    scraper_result = result.get("scraper_result", {})
+    extra_attributes = {
+        k: v for k, v in scraper_result.items()
+        if k not in registry_keys and v is not None
+    }
+
+    return {
+        "record": result.get("record", {}),
+        "scraper_result": scraper_result,
+        "extra_attributes": extra_attributes,
+        "evaluation": result.get("evaluation", {}),
+        "fill_rate": result.get("fill_rate", 0.0),
+    }

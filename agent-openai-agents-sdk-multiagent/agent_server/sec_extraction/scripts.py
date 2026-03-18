@@ -50,9 +50,13 @@ def main():
             print(f"Error: file not found: {path}", file=sys.stderr)
             sys.exit(1)
         document = path.read_text(encoding="utf-8", errors="ignore")
+        if not document or not document.strip():
+            print(f"Error: file is empty: {path}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Loaded {len(document):,} chars from {path}", file=sys.stderr)
 
-    if not document:
-        print("Error: provide --document or --file", file=sys.stderr)
+    if not document or not document.strip():
+        print("Error: provide --document or --file with non-empty content", file=sys.stderr)
         sys.exit(1)
 
     # Run extraction
@@ -60,9 +64,13 @@ def main():
         from agent_server.sec_extraction.supervisor import build_supervisor
         from agent_server.sec_extraction.config import get_config
 
+        from langchain_core.messages import HumanMessage
+
         agent = build_supervisor(get_config())
-        result = agent.invoke({"input": f"Extract attributes from this SEC filing:\n\n{document}"})
-        output = {"supervisor_output": result.get("output", "")}
+        result = agent.invoke({"messages": [HumanMessage(content=f"Extract attributes from this SEC filing:\n\n{document}")]})
+        messages = result.get("messages", [])
+        final_text = messages[-1].content if messages else ""
+        output = {"supervisor_output": final_text}
     else:
         from agent_server.sec_extraction.run import run_extraction
 

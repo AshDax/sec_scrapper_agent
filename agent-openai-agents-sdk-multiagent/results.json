@@ -1,0 +1,26 @@
+{
+  "evaluation": {
+    "valid": true,
+    "confidence": 0.125,
+    "fill_rate": 0.125,
+    "missing_fields": [
+      "business_name",
+      "parent_name",
+      "business_phone",
+      "address",
+      "city",
+      "state",
+      "zip_code",
+      "industry_description",
+      "naics_sic_codes",
+      "num_employees",
+      "risk_factor_keywords",
+      "revenue_mentions",
+      "website_domain",
+      "business_purpose_summary"
+    ],
+    "issues": []
+  },
+  "fill_rate": 0.125,
+  "processing_time_s": 7.99
+}

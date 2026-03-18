@@ -145,10 +145,12 @@ async def invoke_handler(request: ResponsesAgentRequest) -> ResponsesAgentRespon
 
     response_text = _format_result(result)
 
+    # ResponsesAgentResponse requires each output message to have an "id" field
+    message_id = str(uuid4())
     return ResponsesAgentResponse(
         output=[
             {
-                "id": str(uuid4()),
+                "id": message_id,
                 "type": "message",
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": response_text}],

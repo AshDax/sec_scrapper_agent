@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 
 if TYPE_CHECKING:
@@ -28,7 +27,6 @@ if TYPE_CHECKING:
 from agent_server.sec_extraction.tools.enrichment import enrich_record
 from agent_server.sec_extraction.tools.evaluate import compute_fill_rate, evaluate_record
 from agent_server.sec_extraction.tools.llm_extract import llm_extract_record
-from agent_server.sec_extraction.tools.retrieval import retrieve_context
 from agent_server.sec_extraction.tools.scraper import scrape_attributes
 from agent_server.sec_extraction.tools.text_extraction import extract_text
 from agent_server.sec_extraction.tools.web_search import web_search
@@ -55,11 +53,8 @@ def regex_scrape(text: str) -> str:
 
 @tool
 def vector_search(query: str) -> str:
-    """Search SEC filing Vector Search index for relevant context."""
-    from agent_server.sec_extraction.config import get_config
-    cfg = _config_ref or get_config()
-    chunks = retrieve_context(query, cfg)
-    return "\n---\n".join(chunks) if chunks else "No results found."
+    """Search SEC filing Vector Search index for relevant context. (Currently disabled — returns empty.)"""
+    return "No results found. (Retrieval is disabled.)"
 
 
 @tool
@@ -136,12 +131,11 @@ Return the final enriched BusinessRecord JSON as your answer.
 def build_supervisor(config: ExtractionConfig | None = None):
     """Build a ReAct supervisor agent with all extraction tools.
 
-    Returns a LangChain AgentExecutor.
+    Returns a LangGraph compiled graph that accepts {"messages": [...]}.
     """
     global _config_ref
 
-    from langchain.agents import AgentExecutor, create_tool_calling_agent
-    from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+    from langgraph.prebuilt import create_react_agent
     from agent_server.sec_extraction.config import get_config
 
     cfg = config or get_config()
@@ -149,12 +143,8 @@ def build_supervisor(config: ExtractionConfig | None = None):
 
     llm = cfg.get_llm(temperature=0)
 
-    prompt = ChatPromptTemplate.from_messages([
-        SystemMessage(content=SUPERVISOR_SYSTEM),
-        MessagesPlaceholder(variable_name="chat_history", optional=True),
-        ("human", "{input}"),
-        MessagesPlaceholder(variable_name="agent_scratchpad"),
-    ])
-
-    agent = create_tool_calling_agent(llm, SUPERVISOR_TOOLS, prompt)
-    return AgentExecutor(agent=agent, tools=SUPERVISOR_TOOLS, verbose=True, max_iterations=10)
+    return create_react_agent(
+        model=llm,
+        tools=SUPERVISOR_TOOLS,
+        prompt=SUPERVISOR_SYSTEM,
+    )

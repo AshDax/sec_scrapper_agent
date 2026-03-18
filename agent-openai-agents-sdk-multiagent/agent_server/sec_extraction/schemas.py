@@ -71,6 +71,7 @@ class EvaluationResult(BaseModel):
     valid: bool = False
     confidence: float = 0.0
     fill_rate: float = 0.0
+    filled_fields: list[str] = Field(default_factory=list)
     missing_fields: list[str] = Field(default_factory=list)
     issues: list[str] = Field(default_factory=list)
 

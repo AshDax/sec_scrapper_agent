@@ -70,6 +70,15 @@ def run_extraction(
             if result.get("evaluation", {}).get("valid", False):
                 successful += 1
 
+            logger.info(
+                "Doc %d: record=%d fields, scraper=%d fields, extra=%d fields, fill_rate=%.2f",
+                i,
+                len(result.get("record", {})),
+                len(result.get("scraper_result", {})),
+                len(result.get("extra_attributes", {})),
+                fill_rate,
+            )
+
             result["processing_time_s"] = round(elapsed, 2)
             results.append(result)
 

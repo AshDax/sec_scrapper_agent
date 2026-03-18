@@ -45,10 +45,12 @@ Check for:
 """
 
 
-def compute_fill_rate(record_dict: dict) -> tuple[float, list[str]]:
-    """Return (fill_rate, missing_fields) using the attribute registry."""
+def compute_fill_rate(record_dict: dict) -> tuple[float, list[str], list[str]]:
+    """Return (fill_rate, filled_fields, missing_fields) using the attribute registry."""
     registry = get_registry()
-    return registry.compute_fill_rate(record_dict)
+    rate, missing = registry.compute_fill_rate(record_dict)
+    filled = [name for name in registry.attribute_names if name not in set(missing)]
+    return rate, filled, missing
 
 
 def evaluate_record(
@@ -60,7 +62,7 @@ def evaluate_record(
 
     Returns an EvaluationResult dict.
     """
-    fill_rate, missing = compute_fill_rate(record_dict)
+    fill_rate, filled, missing = compute_fill_rate(record_dict)
 
     llm_eval = {"valid": True, "confidence": fill_rate, "issues": []}
 
@@ -90,6 +92,7 @@ def evaluate_record(
         valid=llm_eval.get("valid", fill_rate >= 0.5),
         confidence=llm_eval.get("confidence", fill_rate),
         fill_rate=fill_rate,
+        filled_fields=filled,
         missing_fields=missing,
         issues=llm_eval.get("issues", []),
     ).model_dump()

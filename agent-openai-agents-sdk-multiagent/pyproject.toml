@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "beautifulsoup4>=4.12.0",
     "fastapi>=0.129.0",
     "uvicorn>=0.41.0",
     "databricks-agents>=1.9.3",
@@ -41,3 +42,4 @@ start-server = "agent_server.start_server:main"
 agent-evaluate = "agent_server.evaluate_agent:evaluate"
 discover-tools = "scripts.discover_tools:main"
 run-sec-extraction = "agent_server.sec_extraction.scripts:main"
+batch-sec-extraction = "agent_server.sec_extraction.batch_process:main"

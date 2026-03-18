@@ -1,773 +1,888 @@
 """
-SEC Filing Attribute Extractor — Streamlit UI
-
-Provides a rich interface to extract structured business attributes from SEC
-filings.  Supports pasting raw text, uploading files, or searching by company
-name.  Includes a "Quick Scrape" mode (regex-only, no backend needed) and a
-full "AI Extraction" mode that calls the agent backend.
+SEC Pilot — Demo Dashboard
+Data Axle | Hackathon 2026
 """
 
 import json
 import os
-import re
 import sys
 import time
+from pathlib import Path
 
 import pandas as pd
-import requests
 import streamlit as st
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from agent_server.sec_extraction.attribute_registry import get_registry
 
+_registry = get_registry()
+ATTRIBUTE_LABELS = _registry.get_labels_for_ui()
+TARGET_ATTR_COUNT = 46  # SEC_EXTRACTABLE_ATTRS in llm_extract.py
+
 # ---------------------------------------------------------------------------
-# Page configuration
+# Page config
 # ---------------------------------------------------------------------------
 
 st.set_page_config(
-    page_title="SEC Filing Extractor",
-    page_icon="📊",
+    page_title="SEC Pilot — Data Axle",
+    page_icon="⚡",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # ---------------------------------------------------------------------------
-# Custom CSS
+# Theme
 # ---------------------------------------------------------------------------
 
-st.markdown(
-    """
+BRAND_DARK = "#0B1929"
+BRAND_ACCENT = "#00C853"
+BRAND_ACCENT2 = "#00B8D4"
+BRAND_CARD_BG = "#FFFFFF"
+BRAND_SURFACE = "#F4F6F9"
+BRAND_TEXT = "#1A2332"
+BRAND_MUTED = "#6B7B8D"
+
+st.markdown(f"""
 <style>
-    /* Header */
-    .block-container { padding-top: 2rem; }
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
 
-    /* Confidence colours */
-    .conf-high  { color: #22c55e; font-weight: 700; }
-    .conf-med   { color: #eab308; font-weight: 700; }
-    .conf-low   { color: #ef4444; font-weight: 700; }
+    html, body, [class*="css"] {{
+        font-family: 'Inter', -apple-system, sans-serif;
+    }}
+    .block-container {{
+        padding-top: 0rem;
+        padding-bottom: 2rem;
+        max-width: 1400px;
+    }}
+    header[data-testid="stHeader"] {{
+        background: transparent !important;
+        backdrop-filter: none !important;
+    }}
 
-    /* Source badges */
-    .badge {
+    /* Hide deploy button + Streamlit branding */
+    .stDeployButton, #MainMenu, footer,
+    button[kind="header"], [data-testid="stToolbar"] {{
+        display: none !important;
+        visibility: hidden !important;
+    }}
+
+    /* Hero */
+    .hero {{
+        background: linear-gradient(135deg, {BRAND_DARK} 0%, #132F4C 60%, #1A3A5C 100%);
+        padding: 2rem 2.5rem 1.2rem 2.5rem;
+        border-radius: 0 0 16px 16px;
+        margin: -1rem -1rem 1.5rem -1rem;
+        color: white;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        position: relative;
+        z-index: 1;
+    }}
+    .hero-left {{ flex: 1; }}
+    .hero-right {{
+        text-align: right;
+        font-size: 0.85rem;
+        color: #94A3B8;
+    }}
+    .hero-brand {{
+        font-size: 1.1rem;
+        letter-spacing: 4px;
+        text-transform: uppercase;
+        color: {BRAND_ACCENT};
+        font-weight: 800;
+        margin-bottom: 2px;
+    }}
+    .hero-title {{
+        font-size: 1.8rem;
+        font-weight: 800;
+        margin: 0;
+        line-height: 1.2;
+    }}
+    .hero-sub {{
+        font-size: 0.9rem;
+        color: #94A3B8;
+        margin-top: 4px;
+    }}
+    .hero-badge {{
         display: inline-block;
-        padding: 2px 10px;
-        border-radius: 12px;
-        font-size: 0.75rem;
+        background: rgba(0,200,83,0.15);
+        color: {BRAND_ACCENT};
+        padding: 4px 14px;
+        border-radius: 20px;
+        font-size: 0.8rem;
         font-weight: 600;
-        margin-right: 4px;
-    }
-    .badge-scraper       { background: #dbeafe; color: #1d4ed8; }
-    .badge-vector_search { background: #dcfce7; color: #15803d; }
-    .badge-web_search    { background: #fef3c7; color: #a16207; }
-    .badge-llm_inference { background: #f3e8ff; color: #7e22ce; }
+        margin-top: 8px;
+        border: 1px solid rgba(0,200,83,0.3);
+    }}
 
-    /* Status */
-    .status-open   { color: #22c55e; font-weight: 700; font-size: 1.3rem; }
-    .status-closed { color: #ef4444; font-weight: 700; font-size: 1.3rem; }
+    /* KPI */
+    .kpi-card {{
+        background: {BRAND_CARD_BG};
+        border-radius: 12px;
+        padding: 1.1rem 1.2rem;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+        border: 1px solid #E8ECF0;
+        text-align: center;
+    }}
+    .kpi-value {{
+        font-size: 2rem;
+        font-weight: 800;
+        color: {BRAND_TEXT};
+        line-height: 1;
+        margin-bottom: 4px;
+    }}
+    .kpi-value-green {{ color: {BRAND_ACCENT}; }}
+    .kpi-value-blue  {{ color: {BRAND_ACCENT2}; }}
+    .kpi-label {{
+        font-size: 0.75rem;
+        color: {BRAND_MUTED};
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }}
 
-    /* Metric override */
-    [data-testid="stMetric"] { background: rgba(255,255,255,0.04); border-radius: 8px; padding: 12px; }
+    /* Section headers */
+    .section-header {{
+        font-size: 1.25rem;
+        font-weight: 700;
+        color: {BRAND_TEXT};
+        margin: 1.5rem 0 0.8rem 0;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }}
+    .section-header span {{
+        background: linear-gradient(135deg, {BRAND_ACCENT}, {BRAND_ACCENT2});
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+    }}
 
-    div.stButton > button[kind="primary"] { width: 100%; }
+    /* Architecture — dark theme */
+    .arch-container {{
+        background: linear-gradient(135deg, {BRAND_DARK}, #132F4C);
+        border-radius: 16px;
+        padding: 2rem;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        border: 1px solid #1E3A5F;
+    }}
+    .arch-flow {{
+        display: flex;
+        align-items: stretch;
+        justify-content: center;
+        gap: 0;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        padding: 0.5rem 0;
+    }}
+    .arch-node {{
+        flex: 0 0 auto;
+        min-width: 125px;
+        padding: 0.8rem 0.9rem;
+        border-radius: 10px;
+        text-align: center;
+        transition: transform 0.2s;
+    }}
+    .arch-node:hover {{ transform: translateY(-3px); }}
+    .arch-node-icon {{ font-size: 1.4rem; margin-bottom: 4px; }}
+    .arch-node-title {{
+        font-size: 0.75rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+    }}
+    .arch-node-desc {{
+        font-size: 0.65rem;
+        margin-top: 2px;
+        opacity: 0.85;
+    }}
+    .arch-arrow {{
+        display: flex;
+        align-items: center;
+        font-size: 1.1rem;
+        color: #4A6A8A;
+        padding: 0 3px;
+        flex: 0 0 auto;
+    }}
+    .node-ingest  {{ background: rgba(59,130,246,0.15); color: #93C5FD; border: 1px solid rgba(59,130,246,0.3); }}
+    .node-scrape  {{ background: rgba(249,115,22,0.15); color: #FDBA74; border: 1px solid rgba(249,115,22,0.3); }}
+    .node-filter  {{ background: rgba(34,197,94,0.15);  color: #86EFAC; border: 1px solid rgba(34,197,94,0.3); }}
+    .node-llm     {{ background: rgba(168,85,247,0.15); color: #C4B5FD; border: 1px solid rgba(168,85,247,0.3); }}
+    .node-enrich  {{ background: rgba(236,72,153,0.15); color: #F9A8D4; border: 1px solid rgba(236,72,153,0.3); }}
+    .node-eval    {{ background: rgba(20,184,166,0.15); color: #5EEAD4; border: 1px solid rgba(20,184,166,0.3); }}
+    .node-web     {{ background: rgba(234,179,8,0.15);  color: #FDE68A; border: 1px solid rgba(234,179,8,0.3); }}
+    .node-delta   {{ background: rgba(59,130,246,0.15); color: #93C5FD; border: 1px solid rgba(59,130,246,0.3); }}
+
+    .stats-bar {{
+        display: flex;
+        gap: 1.2rem;
+        flex-wrap: wrap;
+        margin-top: 1rem;
+    }}
+    .stat-chip {{
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: rgba(255,255,255,0.06);
+        padding: 6px 14px;
+        border-radius: 8px;
+        font-size: 0.78rem;
+        color: #94A3B8;
+        font-weight: 500;
+        border: 1px solid rgba(255,255,255,0.08);
+    }}
+    .stat-chip b {{ color: {BRAND_ACCENT}; }}
+
+    /* Streamlit metric overrides */
+    [data-testid="stMetric"] {{
+        background: {BRAND_CARD_BG} !important;
+        border-radius: 10px;
+        padding: 14px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        border: 1px solid #E8ECF0;
+    }}
+    [data-testid="stMetric"] label,
+    [data-testid="stMetric"] [data-testid="stMetricLabel"] {{
+        color: {BRAND_MUTED} !important;
+    }}
+    [data-testid="stMetric"] [data-testid="stMetricValue"] {{
+        color: {BRAND_TEXT} !important;
+    }}
+    div[data-testid="stExpander"] {{
+        background: {BRAND_CARD_BG};
+        border-radius: 10px;
+        border: 1px solid #E8ECF0;
+    }}
+    .dataframe {{ font-size: 0.85rem; }}
+    button[data-baseweb="tab"] {{
+        font-weight: 600 !important;
+        font-size: 0.85rem !important;
+    }}
+
+    /* Live result cards — grouped by category color */
+    .res-group-title {{
+        font-size: 0.8rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin: 1rem 0 0.4rem 0;
+        padding: 4px 12px;
+        border-radius: 6px;
+        display: inline-block;
+    }}
+    .res-group-identity  {{ background: #EFF6FF; color: #1E40AF; }}
+    .res-group-location  {{ background: #F0FDF4; color: #166534; }}
+    .res-group-financial {{ background: #FFF7ED; color: #C2410C; }}
+    .res-group-industry  {{ background: #FAF5FF; color: #7E22CE; }}
+    .res-group-other     {{ background: #F1F5F9; color: #475569; }}
+
+    .result-card {{
+        background: {BRAND_CARD_BG};
+        border-radius: 10px;
+        padding: 0.65rem 1rem;
+        margin-bottom: 6px;
+    }}
+    .result-card-identity  {{ border-left: 3px solid #3B82F6; border: 1px solid #DBEAFE; }}
+    .result-card-location  {{ border-left: 3px solid #22C55E; border: 1px solid #DCFCE7; }}
+    .result-card-financial {{ border-left: 3px solid #F97316; border: 1px solid #FED7AA; }}
+    .result-card-industry  {{ border-left: 3px solid #A855F7; border: 1px solid #E9D5FF; }}
+    .result-card-other     {{ border-left: 3px solid #94A3B8; border: 1px solid #E2E8F0; }}
+
+    .result-card-label {{
+        font-size: 0.7rem;
+        color: {BRAND_MUTED};
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+    }}
+    .result-card-value {{
+        font-size: 0.95rem;
+        font-weight: 700;
+        color: {BRAND_TEXT};
+        word-break: break-word;
+    }}
 </style>
-""",
-    unsafe_allow_html=True,
-)
+""", unsafe_allow_html=True)
+
 
 # ---------------------------------------------------------------------------
-# Constants
+# Load & deduplicate data
 # ---------------------------------------------------------------------------
 
-API_URL = os.environ.get("API_PROXY", "http://localhost:8000/invocations")
+@st.cache_data
+def load_data():
+    jsonl_path = Path(__file__).parent.parent / "extraction_results.jsonl"
+    records = []
+    with open(jsonl_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    # Deduplicate: keep the LAST entry per source file (later run = better)
+    seen: dict[str, int] = {}
+    for i, r in enumerate(records):
+        seen[r.get("_source_file", f"unknown_{i}")] = i
+    deduped = [records[i] for i in sorted(seen.values())]
+    return pd.DataFrame(deduped)
 
-_registry = get_registry()
-ATTRIBUTE_LABELS = _registry.get_labels_for_ui()
 
-QUICK_SCRAPE_PATTERNS = {
-    "phone": [
-        r"\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}",
-        r"\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}",
-    ],
-    "website": [
-        r"(?:https?://)?(?:www\.)?([a-zA-Z0-9][-a-zA-Z0-9]*\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?)",
-    ],
-    "location_employee_count": [
-        r"(?:approximately|about|nearly|over|more than)?\s*(\d{1,3}(?:,\d{3})*)\s+(?:full[- ]?time\s+)?employees",
-        r"(\d{1,3}(?:,\d{3})*)\s+(?:people|personnel|workers)",
-    ],
-    "revenue": [
-        r"\$\s*[\d,]+(?:\.\d+)?\s*(?:billion|million|thousand|B|M|K)",
-        r"(?:revenue|net\s+sales|total\s+revenue)\s+(?:of|was|were|totaled)?\s*\$\s*[\d,]+(?:\.\d+)?",
-    ],
-    "street": [
-        r"\d+\s+[\w\s]+(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Boulevard|Blvd|Way|Lane|Ln|Place|Pl|Suite|Ste)\.?(?:\s*,?\s*(?:Suite|Ste)\.?\s*\d+)?",
-    ],
-    "postal_code": [
-        r"\b[A-Z]{2}\s+(\d{5}(?:-\d{4})?)\b",
-    ],
-    "primary_sic_code_id": [
-        r"(?:SIC)\s*(?:code|Code)?:?\s*(\d{4,6})",
-        r"Standard\s+Industrial\s+Classification\s*(?:code)?\s*:?\s*(\d{4})",
-    ],
-    "primary_naics_code_id": [
-        r"(?:NAICS)\s*(?:code|Code)?:?\s*(\d{4,6})",
-    ],
-    "name": [
-        r"(?:EXACT NAME OF REGISTRANT|Company Name|Registrant)[:\s]+([A-Z][\w\s&.,'-]+(?:Inc|Corp|LLC|Ltd|Co|LP|Company|Corporation|Group|Holdings)\.?)",
-    ],
-    "company_ein": [
-        r"(?:EIN|Employer\s+Identification\s+Number)[:\s]*(\d{2}-?\d{7})",
-    ],
-    "company_year_founded": [
-        r"(?:founded|incorporated|established)\s+(?:in\s+)?(\d{4})",
-    ],
-    "cik": [
-        r"(?:CIK|Central\s+Index\s+Key)[:\s]*(\d{7,10})",
-        r"Commission\s+File\s+Number[:\s]*([\d-]+)",
-    ],
+df = load_data()
+
+# ---------------------------------------------------------------------------
+# Derived columns
+# ---------------------------------------------------------------------------
+
+df["_has_error"] = df["_error"].notna() & (df["_error"] != "")
+df["_revenue_b"] = pd.to_numeric(df.get("revenue"), errors="coerce") / 1e9
+df["_net_income_b"] = pd.to_numeric(df.get("net_income"), errors="coerce") / 1e9
+df["_total_assets_b"] = pd.to_numeric(df.get("total_assets"), errors="coerce") / 1e9
+df["_state"] = df["company_state"].fillna(df.get("state", ""))
+
+total_companies = len(df)
+success_count = int((~df["_has_error"]).sum())
+valid_count = int(df["_valid"].sum())
+avg_time = df["_processing_time_s"].mean()
+total_time_m = df["_processing_time_s"].sum() / 60
+revenue_coverage = int(df["revenue"].notna().sum())
+total_revenue = df["_revenue_b"].sum()
+
+CORE_EXTRACTED_FIELDS = [
+    "company_name", "company_address", "company_city", "company_state",
+    "company_postal_code", "company_phone", "company_ein", "cik",
+    "primary_sic_code_id", "company_sic_name", "revenue", "net_income",
+    "total_assets", "shareholders_equity", "cash", "report_date",
+    "fiscal_year_end_month", "stock_ticker_symbol", "stock_exchange_code",
+]
+
+field_coverage = {}
+for col in CORE_EXTRACTED_FIELDS:
+    if col in df.columns:
+        filled = df[col].notna() & (df[col] != "") & (df[col] != "null")
+        field_coverage[col] = int(filled.sum())
+
+
+# ---------------------------------------------------------------------------
+# Hero
+# ---------------------------------------------------------------------------
+
+st.markdown(f"""
+<div class="hero">
+    <div class="hero-left">
+        <div class="hero-brand">DATA AXLE</div>
+        <div class="hero-title">SEC Pilot — Filing Extraction Pipeline</div>
+        <div class="hero-sub">
+            Autonomous multi-agent pipeline extracting structured business attributes
+            from S&P 500 SEC 10-K filings at scale
+        </div>
+        <div class="hero-badge">⚡ {total_companies} Companies Processed</div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# KPI row
+# ---------------------------------------------------------------------------
+
+k1, k2, k3, k4, k5 = st.columns(5)
+
+with k1:
+    st.markdown(f"""<div class="kpi-card">
+        <div class="kpi-value">{total_companies}</div>
+        <div class="kpi-label">SEC Filings Processed</div>
+    </div>""", unsafe_allow_html=True)
+
+with k2:
+    st.markdown(f"""<div class="kpi-card">
+        <div class="kpi-value kpi-value-green">{valid_count}</div>
+        <div class="kpi-label">Successful Extractions</div>
+    </div>""", unsafe_allow_html=True)
+
+with k3:
+    st.markdown(f"""<div class="kpi-card">
+        <div class="kpi-value">{revenue_coverage}</div>
+        <div class="kpi-label">Revenue Extracted</div>
+    </div>""", unsafe_allow_html=True)
+
+with k4:
+    st.markdown(f"""<div class="kpi-card">
+        <div class="kpi-value kpi-value-blue">{avg_time:.1f}s</div>
+        <div class="kpi-label">Avg Processing Time</div>
+    </div>""", unsafe_allow_html=True)
+
+with k5:
+    st.markdown(f"""<div class="kpi-card">
+        <div class="kpi-value kpi-value-green">${total_revenue:,.0f}B</div>
+        <div class="kpi-label">Total Revenue Captured</div>
+    </div>""", unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Architecture
+# ---------------------------------------------------------------------------
+
+st.markdown('<div class="section-header"><span>⬡</span> Extraction Architecture</div>', unsafe_allow_html=True)
+
+st.markdown(f"""
+<div class="arch-container">
+    <div class="arch-flow">
+        <div class="arch-node node-ingest">
+            <div class="arch-node-icon">📥</div>
+            <div class="arch-node-title">Ingest</div>
+            <div class="arch-node-desc">Read raw .txt from<br/>Databricks Volume</div>
+        </div>
+        <div class="arch-arrow">→</div>
+        <div class="arch-node node-scrape">
+            <div class="arch-node-icon">🔍</div>
+            <div class="arch-node-title">Scraper</div>
+            <div class="arch-node-desc">SEC Header +<br/>XBRL parsing</div>
+        </div>
+        <div class="arch-arrow">→</div>
+        <div class="arch-node node-filter">
+            <div class="arch-node-icon">📄</div>
+            <div class="arch-node-title">Section Filter</div>
+            <div class="arch-node-desc">Extract 10-K,<br/>drop low-value §</div>
+        </div>
+        <div class="arch-arrow">→</div>
+        <div class="arch-node node-llm">
+            <div class="arch-node-icon">🧠</div>
+            <div class="arch-node-title">LLM Extract</div>
+            <div class="arch-node-desc">Structured output<br/>via Groq / GPT</div>
+        </div>
+        <div class="arch-arrow">→</div>
+        <div class="arch-node node-enrich">
+            <div class="arch-node-icon">🏭</div>
+            <div class="arch-node-title">Enrichment</div>
+            <div class="arch-node-desc">NAICS lookup,<br/>manufacturer flag</div>
+        </div>
+        <div class="arch-arrow">→</div>
+        <div class="arch-node node-eval">
+            <div class="arch-node-icon">✅</div>
+            <div class="arch-node-title">Evaluate</div>
+            <div class="arch-node-desc">LLM judge +<br/>fill rate check</div>
+        </div>
+        <div class="arch-arrow">→</div>
+        <div class="arch-node node-web">
+            <div class="arch-node-icon">🌐</div>
+            <div class="arch-node-title">Web Fallback</div>
+            <div class="arch-node-desc">DuckDuckGo search<br/>if fill rate low</div>
+        </div>
+        <div class="arch-arrow">→</div>
+        <div class="arch-node node-delta">
+            <div class="arch-node-icon">💾</div>
+            <div class="arch-node-title">Delta Table</div>
+            <div class="arch-node-desc">Write to Unity<br/>Catalog table</div>
+        </div>
+    </div>
+    <div class="stats-bar">
+        <div class="stat-chip">🏗️ Built with <b>LangGraph</b></div>
+        <div class="stat-chip">🔗 <b>7 Agent Nodes</b> in pipeline</div>
+        <div class="stat-chip">📊 <b>{TARGET_ATTR_COUNT}</b> target attributes</div>
+        <div class="stat-chip">⚡ Conditional web fallback when fill rate &lt; 50%</div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Live Extraction
+# ---------------------------------------------------------------------------
+
+FIELD_CATEGORIES = {
+    "identity": {
+        "fields": {"company_name", "company_legal_name", "company_ein", "cik",
+                    "name", "stock_ticker_symbol", "stock_exchange_code",
+                    "company_year_founded", "company_description", "in_business",
+                    "company_active_indicator"},
+        "label": "Identity & Status",
+        "css": "identity",
+    },
+    "location": {
+        "fields": {"street", "city", "state", "postal_code", "phone", "website",
+                    "company_address", "company_city", "company_state",
+                    "company_postal_code", "company_phone"},
+        "label": "Location & Contact",
+        "css": "location",
+    },
+    "financial": {
+        "fields": {"revenue", "net_income", "gross_profit", "cost_of_revenue",
+                    "total_assets", "total_liabilities_and_equity",
+                    "operating_expenses", "operating_income", "cash",
+                    "current_assets", "shareholders_equity",
+                    "long_term_debt", "short_term_debt", "total_debt",
+                    "report_date", "fiscal_year_end_month", "tax_and_interest"},
+        "label": "Financial Data",
+        "css": "financial",
+    },
+    "industry": {
+        "fields": {"primary_sic_code_id", "primary_naics_code_id",
+                    "company_sic_code", "company_sic_name",
+                    "company_naics_code", "company_naics_name",
+                    "location_employee_count", "corporate_employee_count",
+                    "place_type"},
+        "label": "Industry & Classification",
+        "css": "industry",
+    },
 }
 
-SAMPLE_FILING = """UNITED STATES SECURITIES AND EXCHANGE COMMISSION
-Washington, D.C. 20549
 
-FORM 10-K
-
-ANNUAL REPORT PURSUANT TO SECTION 13 OR 15(d) OF THE
-SECURITIES EXCHANGE ACT OF 1934
-
-For the fiscal year ended December 31, 2024
-
-Commission File Number: 001-38846
-
-EXACT NAME OF REGISTRANT: PINNACLE MANUFACTURING CORPORATION
-State of incorporation: Delaware
-IRS Employer Identification Number: 82-4921573
-
-Address of principal executive offices:
-4200 Industrial Boulevard, Suite 300, Austin, TX 78745
-Telephone: (512) 555-7890
-Website: www.pinnaclemfg.com
-
-ITEM 1. BUSINESS
-
-Pinnacle Manufacturing Corporation ("the Company") is a leading manufacturer
-and distributor of precision-engineered industrial components. Founded in 2003,
-the Company designs, manufactures, and sells high-performance fasteners,
-brackets, and structural components used in aerospace, automotive, and
-construction industries.
-
-The Company operates three production facilities in Austin, TX, Denver, CO,
-and Charlotte, NC, with a combined manufacturing floor space of approximately
-450,000 square feet.
-
-As of December 31, 2024, the Company employed approximately 2,850 full-time
-employees and 340 part-time and contract workers.
-
-Standard Industrial Classification code: 3462
-NAICS Code: 332111
-
-ITEM 1A. RISK FACTORS
-
-The following risk factors could materially affect our business:
-
-- Supply chain disruptions: The Company relies on specialized raw materials
-  including titanium alloys and high-grade steel from a limited number of
-  suppliers. Any disruption could impact production.
-
-- Customer concentration: Approximately 35% of revenue is derived from our
-  top three customers in the aerospace sector.
-
-- Regulatory compliance: Our products must meet stringent quality standards
-  including AS9100D and ISO 9001:2015 certifications.
-
-- Cybersecurity threats: Increasing sophistication of cyber attacks poses
-  risks to our manufacturing control systems and customer data.
-
-- Economic downturn sensitivity: Demand for industrial components is
-  cyclical and closely tied to capital expenditure trends.
-
-ITEM 6. SELECTED FINANCIAL DATA
-
-For the fiscal year ended December 31, 2024:
-- Total revenue was $487.3 million, an increase of 12% from $435.1 million
-  in the prior year.
-- Net income was $52.8 million compared to $41.2 million in 2023.
-- Revenue from aerospace segment: $218.4 million
-- Revenue from automotive segment: $156.7 million
-- Revenue from construction segment: $112.2 million
-
-Pinnacle Manufacturing Corporation is a subsidiary of Apex Industrial Group, Inc.
-"""
+def _categorize(key: str) -> str:
+    for cat_id, cat in FIELD_CATEGORIES.items():
+        if key in cat["fields"]:
+            return cat_id
+    return "other"
 
 
-# ---------------------------------------------------------------------------
-# Helper functions
-# ---------------------------------------------------------------------------
+def render_live_result(record: dict, elapsed: float):
+    """Render extracted attributes grouped by category with color coding."""
+    company = record.get("company_name") or record.get("name") or "Unknown Company"
+    st.markdown(f"##### {company}")
+    st.caption(f"Extracted in {elapsed:.1f}s using the full agentic pipeline")
 
+    filled = {k: v for k, v in record.items()
+              if v is not None and v != "" and v != [] and not str(k).startswith("_")}
+    empty = {k: v for k, v in record.items()
+             if (v is None or v == "" or v == []) and not str(k).startswith("_")}
 
-def extract_response_text(data: dict) -> str:
-    """Pull the assistant's text from an MLflow Responses API payload."""
-    for item in reversed(data.get("output", [])):
-        if item.get("type") == "message" and item.get("role") == "assistant":
-            content = item.get("content")
-            if isinstance(content, list):
-                for c in content:
-                    if isinstance(c, dict) and c.get("type") == "output_text":
-                        return c.get("text", "")
-            if isinstance(content, str):
-                return content
-    texts = []
-    for item in data.get("output", []):
-        content = item.get("content")
-        if isinstance(content, list):
-            for c in content:
-                if isinstance(c, dict) and c.get("text"):
-                    texts.append(c["text"])
-        elif isinstance(content, str):
-            texts.append(content)
-    return "\n".join(texts) if texts else json.dumps(data, indent=2)
+    m1, m2 = st.columns(2)
+    m1.metric("Attributes Extracted", len(filled))
+    m2.metric("Missing", len(empty))
 
+    # Group filled attrs by category
+    grouped: dict[str, list[tuple[str, object]]] = {}
+    for key, val in filled.items():
+        cat = _categorize(key)
+        grouped.setdefault(cat, []).append((key, val))
 
-def _agent_record_to_ui_format(record: dict, evaluation: dict | None = None) -> dict:
-    """Transform agent's extraction record to UI display format using the registry."""
-    ev = evaluation or {}
-    conf = ev.get("confidence", 0.8)
-    attrs: dict = {}
-
-    for key, val in record.items():
-        if key not in ATTRIBUTE_LABELS:
+    cat_order = ["identity", "location", "financial", "industry", "other"]
+    for cat_id in cat_order:
+        items = grouped.get(cat_id, [])
+        if not items:
             continue
-        if isinstance(val, list):
-            display_val = ", ".join(str(v) for v in val) if val else None
-        else:
-            display_val = val
-        attrs[key] = {
-            "value": display_val,
-            "confidence": conf if display_val is not None else 0.0,
-            "source": "llm_inference",
-            "evidence": "",
-        }
-
-    # Fill in missing registry attributes so the UI can show them
-    for key in ATTRIBUTE_LABELS:
-        if key not in attrs:
-            attrs[key] = {"value": None, "confidence": 0.0, "source": "llm_inference", "evidence": ""}
-
-    biz_name = record.get("name") or record.get("company_name") or "Unknown Company"
-    in_biz = record.get("in_business", "")
-    status = "closed" if str(in_biz).lower() in ("no", "false", "closed") else "open"
-    reasoning = "; ".join(ev.get("issues", [])) or "Extracted from SEC filing"
-
-    return {
-        "company_name": biz_name,
-        "filing_type": "Unknown",
-        "attributes": attrs,
-        "business_status": status,
-        "status_reasoning": reasoning,
-    }
-
-
-def _is_agent_record(d: dict) -> bool:
-    """Check if a dict looks like an agent extraction record (has registry fields)."""
-    registry_keys = set(_registry.attribute_names)
-    return len(set(d.keys()) & registry_keys) >= 3
-
-
-def parse_extraction_json(text: str) -> dict | None:
-    """Extract the JSON block from the agent's markdown-wrapped response and normalize to UI format."""
-    def _try_parse(raw: str) -> dict | None:
-        try:
-            parsed = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            return None
-        if not isinstance(parsed, dict):
-            return None
-        record = parsed.get("record", parsed)
-        evaluation = parsed.get("evaluation") if "evaluation" in parsed else None
-        if _is_agent_record(record):
-            return _agent_record_to_ui_format(record, evaluation)
-        return parsed
-
-    # Try ```json ... ``` block first
-    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
-    if match:
-        result = _try_parse(match.group(1).strip())
-        if result:
-            return result
-
-    # Try the entire text as JSON
-    return _try_parse(text)
-
-
-def confidence_class(score: float) -> str:
-    if score >= 0.8:
-        return "conf-high"
-    if score >= 0.5:
-        return "conf-med"
-    return "conf-low"
-
-
-def source_badge(source: str) -> str:
-    css = f"badge-{source}" if f"badge-{source}" in (
-        "badge-scraper",
-        "badge-vector_search",
-        "badge-web_search",
-        "badge-llm_inference",
-    ) else "badge-llm_inference"
-    return f'<span class="badge {css}">{source.replace("_", " ").title()}</span>'
-
-
-def quick_scrape(text: str) -> dict:
-    """Run regex-only extraction (no backend needed)."""
-    results = {}
-    for attr, patterns in QUICK_SCRAPE_PATTERNS.items():
-        all_matches = []
-        for pattern in patterns:
-            all_matches.extend(re.findall(pattern, text, re.IGNORECASE | re.MULTILINE))
-        unique = list(dict.fromkeys(str(m).strip() for m in all_matches if str(m).strip()))[:5]
-        if unique:
-            results[attr] = {
-                "value": unique[0] if len(unique) == 1 else ", ".join(unique),
-                "confidence": 0.85,
-                "source": "scraper",
-                "evidence": f"Regex matched {len(unique)} occurrence(s)",
-            }
-        else:
-            results[attr] = {
-                "value": None,
-                "confidence": 0.0,
-                "source": "scraper",
-                "evidence": "No regex match found",
-            }
-
-    for attr in ATTRIBUTE_LABELS:
-        if attr not in results:
-            results[attr] = {
-                "value": None,
-                "confidence": 0.0,
-                "source": "scraper",
-                "evidence": "No regex pattern for this attribute — requires AI extraction",
-            }
-
-    is_mfg = bool(re.search(
-        r"(?:manufactur|produc(?:tion|e)|fabricat|assembl|factory|plant)",
-        text,
-        re.IGNORECASE,
-    ))
-    results["is_manufacturer"] = {
-        "value": is_mfg,
-        "confidence": 0.7 if is_mfg else 0.3,
-        "source": "scraper",
-        "evidence": "Keyword match for manufacturing terms" if is_mfg else "No manufacturing keywords found",
-    }
-
-    return {
-        "company_name": results.get("name", {}).get("value") or results.get("company_name", {}).get("value") or "Unknown",
-        "filing_type": "Unknown",
-        "attributes": results,
-        "business_status": "open",
-        "status_reasoning": "No closure indicators found (regex-only mode)",
-    }
-
-
-# ---------------------------------------------------------------------------
-# Display functions
-# ---------------------------------------------------------------------------
-
-
-def render_company_header(result: dict):
-    """Top-level company overview bar."""
-    col1, col2, col3, col4 = st.columns([3, 1, 1, 1])
-    with col1:
-        st.markdown(f"### {result.get('company_name', 'Unknown Company')}")
-    with col2:
-        filing = result.get("filing_type", "N/A")
-        st.metric("Filing Type", filing)
-    with col3:
-        status = result.get("business_status", "unknown")
-        label = "Open" if status == "open" else "Closed" if status == "closed" else status.title()
-        st.metric("Status", label)
-    with col4:
-        attrs = result.get("attributes", {})
-        found = sum(1 for a in attrs.values() if a.get("value") is not None)
-        st.metric("Attributes Found", f"{found} / {len(attrs)}")
-
-    reasoning = result.get("status_reasoning", "")
-    if reasoning:
-        st.caption(f"Status reasoning: {reasoning}")
-
-
-def render_attribute_cards(result: dict):
-    """3-column grid of attribute cards with confidence bars."""
-    attrs = result.get("attributes", {})
-    items = list(attrs.items())
-
-    for row_start in range(0, len(items), 3):
-        cols = st.columns(3)
-        for col_idx, (attr, details) in enumerate(items[row_start : row_start + 3]):
-            icon, label = ATTRIBUTE_LABELS.get(attr, ("📌", attr.replace("_", " ").title()))
-            with cols[col_idx]:
-                with st.container(border=True):
-                    st.markdown(f"**{icon} {label}**")
-
-                    value = details.get("value")
-                    confidence = details.get("confidence", 0)
-                    source = details.get("source", "unknown")
-                    evidence = details.get("evidence", "")
-
-                    if value is None:
-                        st.markdown("*Not found*")
-                    elif isinstance(value, bool):
-                        st.markdown(f"**{'Yes' if value else 'No'}**")
-                    elif isinstance(value, list):
-                        st.markdown(f"**{', '.join(str(v) for v in value)}**")
-                    else:
-                        display = str(value)
-                        if len(display) > 120:
-                            display = display[:120] + "..."
-                        st.markdown(f"**{display}**")
-
-                    conf_color = confidence_class(confidence)
-                    st.progress(confidence)
+        cat_info = FIELD_CATEGORIES.get(cat_id, {"label": "Other", "css": "other"})
+        st.markdown(
+            f'<div class="res-group-title res-group-{cat_info["css"]}">'
+            f'{cat_info["label"]} ({len(items)})</div>',
+            unsafe_allow_html=True,
+        )
+        for row_start in range(0, len(items), 4):
+            cols = st.columns(4)
+            for col_idx, (key, val) in enumerate(items[row_start:row_start + 4]):
+                with cols[col_idx]:
+                    icon, label = ATTRIBUTE_LABELS.get(key, ("", key.replace("_", " ").title()))
+                    display = str(val)
+                    if len(display) > 80:
+                        display = display[:80] + "..."
                     st.markdown(
-                        f'<span class="{conf_color}">{confidence:.0%}</span> '
-                        f"{source_badge(source)}",
+                        f'<div class="result-card result-card-{cat_info["css"]}">'
+                        f'<div class="result-card-label">{icon} {label}</div>'
+                        f'<div class="result-card-value">{display}</div>'
+                        f'</div>',
                         unsafe_allow_html=True,
                     )
 
-                    if evidence:
-                        with st.expander("Evidence"):
-                            st.caption(evidence)
+    with st.expander(f"Show {len(empty)} missing fields"):
+        missing_names = [ATTRIBUTE_LABELS.get(k, ("", k.replace("_", " ").title()))[1] for k in empty]
+        st.caption(", ".join(missing_names) if missing_names else "None")
 
-
-def render_insights(result: dict):
-    """Charts and analytics for the extraction results."""
-    attrs = result.get("attributes", {})
-    if not attrs:
-        return
-
-    st.markdown("---")
-    st.subheader("📊 Extraction Insights")
-
-    tab_conf, tab_src, tab_risk, tab_table = st.tabs([
-        "Confidence Scores",
-        "Source Distribution",
-        "Risk Factors",
-        "Data Table",
-    ])
-
-    with tab_conf:
-        conf_df = pd.DataFrame([
-            {
-                "Attribute": ATTRIBUTE_LABELS.get(k, ("", k))[1],
-                "Confidence": v.get("confidence", 0),
-            }
-            for k, v in attrs.items()
-        ])
-        conf_df = conf_df.sort_values("Confidence", ascending=True)
-        st.bar_chart(conf_df.set_index("Attribute"), horizontal=True, height=420)
-
-        avg_conf = conf_df["Confidence"].mean()
-        found_count = sum(1 for v in attrs.values() if v.get("value") is not None)
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Average Confidence", f"{avg_conf:.0%}")
-        c2.metric("Attributes Found", f"{found_count}/{len(attrs)}")
-        c3.metric("High Confidence (>=80%)", sum(1 for v in attrs.values() if v.get("confidence", 0) >= 0.8))
-
-    with tab_src:
-        source_counts: dict[str, int] = {}
-        for v in attrs.values():
-            s = v.get("source", "unknown")
-            source_counts[s] = source_counts.get(s, 0) + 1
-        src_df = pd.DataFrame(
-            [{"Source": k.replace("_", " ").title(), "Count": v} for k, v in source_counts.items()]
-        )
-        if not src_df.empty:
-            st.bar_chart(src_df.set_index("Source"), height=300)
-        st.caption("Distribution of extraction methods used across all attributes.")
-
-    with tab_risk:
-        risk = attrs.get("risk_factor_keywords", {})
-        risk_val = risk.get("value")
-        if risk_val:
-            if isinstance(risk_val, list):
-                for rf in risk_val:
-                    st.markdown(f"- ⚠️ {rf}")
-            elif isinstance(risk_val, str):
-                for line in risk_val.split(","):
-                    line = line.strip()
-                    if line:
-                        st.markdown(f"- ⚠️ {line}")
-        else:
-            st.info("No risk factors extracted.")
-
-        purpose = attrs.get("business_purpose_summary", {}).get("value")
-        if purpose:
-            st.markdown("---")
-            st.markdown("**Business Purpose**")
-            st.info(purpose)
-
-    with tab_table:
-        table_data = []
-        for k, v in attrs.items():
-            _, label = ATTRIBUTE_LABELS.get(k, ("", k))
-            table_data.append({
-                "Attribute": label,
-                "Value": str(v.get("value", "N/A")),
-                "Confidence": f"{v.get('confidence', 0):.0%}",
-                "Source": v.get("source", "N/A"),
-                "Evidence": v.get("evidence", ""),
-            })
-        st.dataframe(pd.DataFrame(table_data), use_container_width=True, hide_index=True)
-
-
-def render_exports(result: dict):
-    """Download buttons for JSON and CSV."""
-    st.markdown("---")
-    col1, col2, _ = st.columns([1, 1, 4])
-    with col1:
+    dl1, dl2, _ = st.columns([1, 1, 4])
+    with dl1:
         st.download_button(
             "📥 Download JSON",
-            data=json.dumps(result, indent=2, default=str),
-            file_name="sec_extraction_result.json",
+            data=json.dumps(record, indent=2, default=str),
+            file_name="extraction_result.json",
             mime="application/json",
         )
-    with col2:
-        attrs = result.get("attributes", {})
-        rows = []
-        for k, v in attrs.items():
-            rows.append({
-                "attribute": k,
-                "value": v.get("value"),
-                "confidence": v.get("confidence"),
-                "source": v.get("source"),
-                "evidence": v.get("evidence"),
-            })
-        csv = pd.DataFrame(rows).to_csv(index=False)
+    with dl2:
+        rows = [{"attribute": k, "value": v} for k, v in filled.items()]
         st.download_button(
             "📥 Download CSV",
-            data=csv,
-            file_name="sec_extraction_result.csv",
+            data=pd.DataFrame(rows).to_csv(index=False),
+            file_name="extraction_result.csv",
             mime="text/csv",
         )
 
 
-# ---------------------------------------------------------------------------
-# Session state
-# ---------------------------------------------------------------------------
+if "live_result" not in st.session_state:
+    st.session_state.live_result = None
+if "live_eval" not in st.session_state:
+    st.session_state.live_eval = None
+if "live_elapsed" not in st.session_state:
+    st.session_state.live_elapsed = 0.0
+if "uploaded_file_content" not in st.session_state:
+    st.session_state.uploaded_file_content = ""
+if "uploaded_file_name" not in st.session_state:
+    st.session_state.uploaded_file_name = ""
 
-if "extraction_result" not in st.session_state:
-    st.session_state.extraction_result = None
-if "raw_response" not in st.session_state:
-    st.session_state.raw_response = None
-if "filing_text" not in st.session_state:
-    st.session_state.filing_text = ""
-
-# ---------------------------------------------------------------------------
-# Sidebar
-# ---------------------------------------------------------------------------
-
-with st.sidebar:
-    st.markdown("## SEC Filing Extractor")
-    st.caption("AI-powered attribute extraction from SEC filings")
-    st.markdown("---")
-
-    st.markdown("### Configuration")
-    api_url = st.text_input("Backend API URL", value=API_URL, help="URL of the agent backend `/invocations` endpoint")
-
-    st.markdown("---")
-    st.markdown(f"### Target Attributes ({len(ATTRIBUTE_LABELS)})")
-    for group_name, group_attrs in _registry.groups.items():
-        with st.expander(f"{group_name} ({len(group_attrs)})"):
-            for a in group_attrs:
-                icon, label = ATTRIBUTE_LABELS.get(a["attribute"], ("📌", a["display_name"]))
-                st.markdown(f"{icon} {label}")
-
-    st.markdown("---")
-    st.markdown("### Extraction Modes")
-    st.markdown(
-        "**Quick Scrape** — regex only, instant, no backend\n\n"
-        "**AI Extraction** — full agent pipeline with RAG, web search, and LLM reasoning"
-    )
-
-# ---------------------------------------------------------------------------
-# Main content
-# ---------------------------------------------------------------------------
-
-st.title("🔍 SEC Filing Attribute Extractor")
-st.caption(
-    "Extract structured business attributes from SEC filings using a multi-agent AI pipeline — "
-    "regex scraper, vector search RAG, web search, and LLM reasoning."
+st.markdown(
+    '<div class="section-header"><span>⬡</span> Live Extraction</div>',
+    unsafe_allow_html=True,
 )
 
-# ---------------------------------------------------------------------------
-# Input section
-# ---------------------------------------------------------------------------
+live_tab_upload, live_tab_paste = st.tabs(["📁 Upload File", "📝 Paste Text"])
 
-st.markdown("### Input")
-input_tab1, input_tab2, input_tab3 = st.tabs(["📝 Paste Text", "📁 Upload File", "🔎 Search by Company"])
-
-with input_tab1:
-    col_text, col_help = st.columns([4, 1])
-    with col_text:
-        filing_input = st.text_area(
-            "Paste SEC filing text (10-K, 10-Q, 8-K, etc.)",
-            value=st.session_state.filing_text,
-            height=350,
-            placeholder="Paste the full text or relevant sections of an SEC filing here...",
-            key="text_input",
-        )
-    with col_help:
-        st.markdown("#### Quick Start")
-        if st.button("📄 Load Sample", use_container_width=True):
-            st.session_state.filing_text = SAMPLE_FILING
-            st.rerun()
-        st.caption(
-            "Load a sample 10-K filing to test the extraction pipeline immediately."
-        )
-
-with input_tab2:
+with live_tab_upload:
     uploaded = st.file_uploader(
-        "Upload an SEC filing document",
-        type=["txt", "html", "htm", "csv"],
-        help="Supports .txt, .html, and .csv files",
+        "Upload an SEC filing (.txt or .html)",
+        type=["txt", "html", "htm"],
+        help="Drop a raw SEC full-submission file here",
+        key="live_upload",
     )
     if uploaded:
-        raw_bytes = uploaded.read()
-        filing_input = raw_bytes.decode("utf-8", errors="ignore")
-        st.text_area("File preview (first 3 000 chars)", filing_input[:3000], height=200, disabled=True)
+        cached_name = st.session_state.get("uploaded_file_name", "")
+        if not st.session_state.uploaded_file_content or (uploaded.name != cached_name):
+            st.session_state.uploaded_file_content = uploaded.read().decode("utf-8", errors="ignore")
+            st.session_state.uploaded_file_name = uploaded.name or ""
+        upload_text = st.session_state.uploaded_file_content
+        st.text_area("Preview (first 2,000 chars)", upload_text[:2000], height=150, disabled=True, key="upload_preview")
+    else:
+        st.session_state.uploaded_file_content = ""
+        st.session_state.uploaded_file_name = ""
+        upload_text = ""
 
-with input_tab3:
-    company_query = st.text_input(
-        "Company name or CIK number",
-        placeholder="e.g. Pinnacle Manufacturing Corp or CIK 0001234567",
-    )
-    if company_query:
-        filing_input = (
-            f"Search for SEC filings and extract all business attributes for: {company_query}. "
-            "Use the vector search to find their latest filing, then extract all 12 attributes."
-        )
-
-# Determine the final input text
-input_text = ""
-if "filing_input" in dir() and filing_input:
-    input_text = filing_input
-elif st.session_state.filing_text:
-    input_text = st.session_state.filing_text
-
-# ---------------------------------------------------------------------------
-# Action buttons
-# ---------------------------------------------------------------------------
-
-st.markdown("")
-btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 4])
-
-with btn_col1:
-    do_quick = st.button("⚡ Quick Scrape", use_container_width=True, help="Regex-only, instant, no backend needed")
-
-with btn_col2:
-    do_full = st.button(
-        "🚀 AI Extraction",
-        type="primary",
-        use_container_width=True,
-        help="Full agent pipeline — scraper + vector search + web search + LLM",
+with live_tab_paste:
+    paste_text = st.text_area(
+        "Paste SEC filing text",
+        height=200,
+        placeholder="Paste the full .txt content of an SEC filing here...",
+        key="live_paste",
     )
 
-# ---------------------------------------------------------------------------
-# Quick Scrape
-# ---------------------------------------------------------------------------
+input_text = st.session_state.uploaded_file_content or paste_text
 
-if do_quick:
+btn_col, _ = st.columns([1, 5])
+with btn_col:
+    do_extract = st.button("🚀 Trigger Agent", type="primary", use_container_width=True, key="trigger_agent_btn")
+
+if do_extract:
     if not input_text.strip():
-        st.error("Please provide filing text first (paste or upload).")
+        st.error("Please upload a file or paste text first.")
     else:
-        with st.spinner("Running regex extraction..."):
-            result = quick_scrape(input_text)
-            st.session_state.extraction_result = result
-            st.session_state.raw_response = None
-
-# ---------------------------------------------------------------------------
-# Full AI Extraction
-# ---------------------------------------------------------------------------
-
-if do_full:
-    if not input_text.strip():
-        st.error("Please provide filing text or a company name first.")
-    else:
-        progress = st.progress(0, text="Initializing extraction pipeline...")
-
-        prompt = (
-            "Extract ALL business attributes from the following SEC filing text. "
-            "Use scraper_extract first for structured patterns (phone, address, employees, "
-            "revenue, NAICS/SIC, website, business name). Then use vector search and web search "
-            "for remaining attributes. Return the complete structured JSON with all 12 attributes, "
-            "business_status, and status_reasoning.\n\n"
-            "SEC Filing Text:\n"
-            "---\n"
-            f"{input_text}\n"
-            "---"
-        )
-
-        progress.progress(15, text="Calling extraction agent...")
-
         try:
-            t0 = time.time()
-            resp = requests.post(
-                api_url,
-                json={"input": [{"role": "user", "content": prompt}]},
-                timeout=180,
-            )
+            from dotenv import load_dotenv
+            load_dotenv(dotenv_path=".env", override=True)
+        except ImportError:
+            pass
+
+        progress_placeholder = st.empty()
+        progress_placeholder.progress(0, text="Starting extraction pipeline...")
+        t0 = time.time()
+        try:
+            from agent_server.sec_extraction.config import get_config
+            from agent_server.sec_extraction.workflow import extraction_workflow
+
+            progress_placeholder.progress(10, text="Step 1/6 — Scraper: parsing SEC header + XBRL tags...")
+            result = extraction_workflow(input_text, get_config())
             elapsed = time.time() - t0
+            progress_placeholder.progress(100, text=f"Extraction complete — {elapsed:.1f}s")
+            time.sleep(0.5)
+            progress_placeholder.empty()
 
-            progress.progress(80, text="Parsing agent response...")
+            st.session_state.live_result = result.get("record", {})
+            st.session_state.live_eval = result.get("evaluation", {})
+            st.session_state.live_elapsed = elapsed
+            st.rerun()
+        except Exception as exc:
+            progress_placeholder.empty()
+            st.error(f"Pipeline error: {exc}")
 
-            if resp.status_code == 200:
-                data = resp.json()
-                text = extract_response_text(data)
-                result = parse_extraction_json(text)
+if st.session_state.live_result:
+    st.markdown("---")
+    st.success(
+        f"**Extraction Complete** — "
+        f"{st.session_state.live_result.get('company_name') or st.session_state.live_result.get('name', 'Unknown')} "
+        f"— {st.session_state.live_elapsed:.1f}s"
+    )
+    render_live_result(
+        st.session_state.live_result,
+        elapsed=st.session_state.live_elapsed,
+    )
 
-                progress.progress(100, text=f"Done in {elapsed:.1f}s")
-                time.sleep(0.5)
-                progress.empty()
-
-                if result:
-                    st.session_state.extraction_result = result
-                    st.session_state.raw_response = text
-                else:
-                    st.session_state.extraction_result = None
-                    st.session_state.raw_response = text
-                    st.warning("Could not parse structured JSON from the agent response.")
-            else:
-                progress.empty()
-                st.error(f"Backend returned HTTP {resp.status_code}. Check that the agent server is running.")
-                try:
-                    st.code(resp.text[:2000])
-                except Exception:
-                    pass
-
-        except requests.ConnectionError:
-            progress.empty()
-            st.error(
-                "Cannot connect to the agent backend. "
-                f"Make sure the server is running at **{api_url}**.\n\n"
-                "Start it with: `uv run start-server`"
-            )
-        except requests.Timeout:
-            progress.empty()
-            st.error("Request timed out (180 s). Try with a shorter document or check backend logs.")
 
 # ---------------------------------------------------------------------------
-# Results
+# Insights tabs
 # ---------------------------------------------------------------------------
 
-if st.session_state.extraction_result:
-    st.markdown("---")
-    render_company_header(st.session_state.extraction_result)
-    st.markdown("")
-    render_attribute_cards(st.session_state.extraction_result)
-    render_insights(st.session_state.extraction_result)
-    render_exports(st.session_state.extraction_result)
+st.markdown('<div class="section-header"><span>⬡</span> Extraction Insights</div>', unsafe_allow_html=True)
 
-if st.session_state.raw_response and not st.session_state.extraction_result:
+tab_field, tab_industry, tab_geo, tab_finance, tab_data = st.tabs([
+    "📋 Field Coverage",
+    "🏢 Industry Breakdown",
+    "🗺️ Geographic Distribution",
+    "💰 Financial Analytics",
+    "📊 Full Data Table",
+])
+
+with tab_field:
+    st.markdown("##### Attribute Extraction Coverage Across All Filings")
+    st.caption("Percentage of companies where each attribute was successfully extracted")
+
+    cov_df = pd.DataFrame([
+        {
+            "Attribute": k.replace("_", " ").title(),
+            "Extracted": v,
+            "Coverage (%)": round(v / total_companies * 100, 1),
+        }
+        for k, v in sorted(field_coverage.items(), key=lambda x: -x[1])
+    ])
+
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        chart_df = cov_df.set_index("Attribute")[["Coverage (%)"]].sort_values("Coverage (%)", ascending=True)
+        st.bar_chart(chart_df, horizontal=True, height=520, color=BRAND_ACCENT)
+    with c2:
+        full_cov = sum(1 for v in field_coverage.values() if v == total_companies)
+        high_cov = sum(1 for v in field_coverage.values() if v / total_companies >= 0.9)
+        st.metric("100% Coverage Fields", f"{full_cov} / {len(field_coverage)}")
+        st.metric(">90% Coverage Fields", f"{high_cov} / {len(field_coverage)}")
+        st.metric("Revenue Extraction", f"{revenue_coverage}/{total_companies} ({revenue_coverage/total_companies:.0%})")
+        st.markdown("---")
+        st.markdown("**Key fields at 100%:**")
+        for k, v in field_coverage.items():
+            if v == total_companies:
+                st.markdown(f"- {k.replace('_', ' ').title()}")
+
+
+with tab_industry:
+    st.markdown("##### Industry Distribution (by SIC Classification)")
+
+    sic_counts = df["company_sic_name"].value_counts().head(15).reset_index()
+    sic_counts.columns = ["Industry (SIC)", "Count"]
+
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        st.bar_chart(sic_counts.set_index("Industry (SIC)"), horizontal=True, height=480, color=BRAND_ACCENT2)
+    with c2:
+        st.metric("Unique Industries", df["company_sic_name"].nunique())
+        st.metric("Top Industry", sic_counts.iloc[0]["Industry (SIC)"])
+        st.metric("Top Industry Count", int(sic_counts.iloc[0]["Count"]))
+
     st.markdown("---")
-    st.subheader("Raw Agent Response")
-    st.markdown(st.session_state.raw_response)
+    st.markdown("##### Stock Exchange Distribution")
+    ex_df = df["stock_exchange_code"].dropna()
+    ex_df = ex_df[ex_df != ""].value_counts().reset_index()
+    ex_df.columns = ["Exchange", "Companies"]
+    ec1, ec2, ec3 = st.columns(3)
+    for i, row in ex_df.iterrows():
+        col = [ec1, ec2, ec3][i % 3]
+        with col:
+            st.metric(row["Exchange"], int(row["Companies"]))
+
+
+with tab_geo:
+    st.markdown("##### Companies by State")
+
+    state_counts = df["_state"].value_counts().head(20).reset_index()
+    state_counts.columns = ["State", "Count"]
+
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        st.bar_chart(state_counts.set_index("State"), horizontal=True, height=520, color="#5B8DEF")
+    with c2:
+        st.metric("States Represented", df["_state"].nunique())
+        st.metric("Top State", state_counts.iloc[0]["State"])
+        st.metric("Top State Count", int(state_counts.iloc[0]["Count"]))
+        top3 = state_counts.head(3)
+        top3_pct = top3["Count"].sum() / total_companies * 100
+        st.metric("Top 3 States %", f"{top3_pct:.0f}%")
+
+    st.markdown("---")
+    st.markdown("##### Top Cities by Company Count")
+    city_counts = df["company_city"].value_counts().head(10).reset_index()
+    city_counts.columns = ["City", "Count"]
+    st.bar_chart(city_counts.set_index("City"), height=300, color=BRAND_ACCENT)
+
+
+with tab_finance:
+    st.markdown("##### Revenue Distribution (Top 25 Companies)")
+
+    rev_df = df[df["_revenue_b"].notna()].nlargest(25, "_revenue_b")[
+        ["company_name", "_revenue_b", "_net_income_b", "_total_assets_b", "company_state"]
+    ].copy()
+    rev_df.columns = ["Company", "Revenue ($B)", "Net Income ($B)", "Total Assets ($B)", "State"]
+
+    st.bar_chart(
+        rev_df.set_index("Company")[["Revenue ($B)"]].sort_values("Revenue ($B)", ascending=True),
+        horizontal=True, height=600, color=BRAND_ACCENT,
+    )
+
+    st.markdown("---")
+    fc1, fc2, fc3, fc4 = st.columns(4)
+
+    rev_all = df["_revenue_b"].dropna()
+    ni_all = df["_net_income_b"].dropna()
+    ta_all = df["_total_assets_b"].dropna()
+    cash_b = pd.to_numeric(df.get("cash"), errors="coerce").dropna() / 1e9
+
+    with fc1:
+        st.metric("Total Revenue", f"${rev_all.sum():,.0f}B")
+        st.metric("Median Revenue", f"${rev_all.median():,.1f}B")
+    with fc2:
+        st.metric("Total Net Income", f"${ni_all.sum():,.0f}B")
+        st.metric("Median Net Income", f"${ni_all.median():,.1f}B")
+    with fc3:
+        st.metric("Total Assets", f"${ta_all.sum():,.0f}B")
+        st.metric("Median Assets", f"${ta_all.median():,.1f}B")
+    with fc4:
+        st.metric("Total Cash", f"${cash_b.sum():,.0f}B")
+        st.metric("Median Cash", f"${cash_b.median():,.1f}B")
+
+    st.markdown("---")
+    st.markdown("##### Revenue vs Total Assets")
+    scatter_df = df[["company_name", "_revenue_b", "_total_assets_b"]].dropna().copy()
+    scatter_df.columns = ["Company", "Revenue ($B)", "Total Assets ($B)"]
+    st.scatter_chart(scatter_df, x="Revenue ($B)", y="Total Assets ($B)", height=400, color=BRAND_ACCENT2)
+
+
+with tab_data:
+    st.markdown("##### Extracted Company Records")
+
+    display_cols = [
+        "_source_file", "company_name", "company_state", "company_sic_name",
+        "revenue", "net_income", "total_assets", "cash",
+        "location_employee_count", "stock_exchange_code", "stock_ticker_symbol",
+        "_processing_time_s",
+    ]
+    available_cols = [c for c in display_cols if c in df.columns]
+
+    search = st.text_input("Search companies...", placeholder="e.g. Apple, CA, NYSE")
+
+    col_renames = {
+        "_source_file": "File", "company_name": "Company", "company_state": "State",
+        "company_sic_name": "Industry", "revenue": "Revenue", "net_income": "Net Income",
+        "total_assets": "Total Assets", "cash": "Cash",
+        "location_employee_count": "Employees", "stock_exchange_code": "Exchange",
+        "stock_ticker_symbol": "Ticker", "_processing_time_s": "Time (s)",
+    }
+    table_df = df[available_cols].copy()
+    table_df.columns = [col_renames.get(c, c) for c in available_cols]
+
+    if search:
+        mask = table_df.apply(lambda row: search.lower() in str(row.values).lower(), axis=1)
+        table_df = table_df[mask]
+
+    st.dataframe(table_df, use_container_width=True, hide_index=True, height=600)
+    st.caption(f"Showing {len(table_df)} of {total_companies} records")
+
+    st.download_button(
+        "📥 Download CSV",
+        data=table_df.to_csv(index=False),
+        file_name="sec_extraction_results.csv",
+        mime="text/csv",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Footer
+# ---------------------------------------------------------------------------
+
+st.markdown("---")
+st.markdown(f"""
+<div style="text-align: center; color: {BRAND_MUTED}; font-size: 0.8rem; padding: 1rem 0;">
+    <strong style="color: {BRAND_TEXT};">Data Axle</strong> · SEC Pilot · Hackathon 2026<br/>
+    Built with LangGraph, Databricks, Groq, and Vector Search
+</div>
+""", unsafe_allow_html=True)

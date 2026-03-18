@@ -34,6 +34,7 @@ from agent_server.sec_extraction.tools.enrichment import enrich_record
 from agent_server.sec_extraction.tools.evaluate import evaluate_record
 from agent_server.sec_extraction.tools.llm_extract import llm_extract_record
 from agent_server.sec_extraction.tools.scraper import scrape_attributes
+from agent_server.sec_extraction.tools.section_filtering import filter_sections
 from agent_server.sec_extraction.tools.text_extraction import extract_text
 from agent_server.sec_extraction.tools.web_search import web_search
 
@@ -48,6 +49,7 @@ logger = logging.getLogger(__name__)
 class WorkflowState(TypedDict, total=False):
     raw_text: str
     clean_text: str
+    filtered_text: str  # 10-K sections only (for LLM); fallback to clean_text
     scraper_result: dict
     record: dict
     llm_record: dict
@@ -71,14 +73,18 @@ def scraper_node(state: WorkflowState, config: RunnableConfig | None = None) -> 
 
 def llm_extract_node(state: WorkflowState, config: RunnableConfig | None = None) -> dict:
     ext_config = _get_ext_config(config)
+    raw = state.get("raw_text", "")
     clean = state.get("clean_text", "")
-    if not (clean and clean.strip()):
-        raw = state.get("raw_text", "")
-        if raw and raw.strip():
-            clean = extract_text(raw[:200_000])[:12000]
-            logger.warning("clean_text was empty; used fallback from raw_text (%d chars)", len(clean))
+    if not (clean and clean.strip()) and raw and raw.strip():
+        clean = extract_text(raw[:200_000])[:12000]
+        logger.warning("clean_text was empty; used fallback from raw_text (%d chars)", len(clean))
+    # Extract only 10-K sections before passing to LLM; fallback to full clean text if no 10-K
+    filtered = filter_sections(raw, verbose=False) if raw else ""
+    text_for_llm = (filtered if (filtered and filtered.strip()) else clean) or ""
+    if not text_for_llm:
+        logger.warning("llm_extract: no text for LLM (filter_sections and clean_text both empty)")
     record, llm_record = llm_extract_record(
-        text=clean,
+        text=text_for_llm,
         scraper_result=state.get("scraper_result", {}),
         context_chunks=[],
         config=ext_config,
@@ -86,7 +92,7 @@ def llm_extract_node(state: WorkflowState, config: RunnableConfig | None = None)
     logger.info("llm_extract: produced record with %d non-null fields (%d from LLM)",
                 sum(1 for v in record.values() if v is not None and v != []),
                 sum(1 for v in llm_record.values() if v is not None and v != [] and v != ""))
-    return {"record": record, "llm_record": llm_record}
+    return {"record": record, "llm_record": llm_record, "filtered_text": text_for_llm}
 
 
 def enrichment_node(state: WorkflowState, config: RunnableConfig | None = None) -> dict:
@@ -99,7 +105,8 @@ def enrichment_node(state: WorkflowState, config: RunnableConfig | None = None) 
 
 def evaluate_node(state: WorkflowState, config: RunnableConfig | None = None) -> dict:
     ext_config = _get_ext_config(config)
-    source_text = state.get("clean_text", "")
+    # Prefer filtered text (what the LLM saw) when available
+    source_text = state.get("filtered_text") or state.get("clean_text", "")
     if not (source_text and source_text.strip()):
         raw = state.get("raw_text", "")
         if raw and raw.strip():
@@ -136,8 +143,9 @@ def web_fallback_node(state: WorkflowState, config: RunnableConfig | None = None
     snippets = web_search(query, ext_config)
     logger.info("web_fallback: got %d snippets for '%s'", len(snippets), query[:60])
 
+    text_for_llm = state.get("filtered_text") or state.get("clean_text", "")
     record, llm_record = llm_extract_record(
-        text=state.get("clean_text", ""),
+        text=text_for_llm,
         scraper_result=state.get("scraper_result", {}),
         context_chunks=snippets,
         config=ext_config,
@@ -148,9 +156,10 @@ def web_fallback_node(state: WorkflowState, config: RunnableConfig | None = None
 
 def re_evaluate_node(state: WorkflowState, config: RunnableConfig | None = None) -> dict:
     ext_config = _get_ext_config(config)
+    source_text = state.get("filtered_text") or state.get("clean_text", "")
     evaluation = evaluate_record(
         record_dict=state.get("record", {}),
-        source_text=state.get("clean_text", ""),
+        source_text=source_text,
         config=ext_config,
         llm_record=state.get("llm_record"),
     )

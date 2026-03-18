@@ -66,8 +66,13 @@ def main():
 
         from langchain_core.messages import HumanMessage
 
+        # Supervisor sends the prompt to the LLM; keep document within context limit.
+        MAX_SUPERVISOR_DOC_CHARS = 6_000
+        doc_excerpt = document[:MAX_SUPERVISOR_DOC_CHARS]
+        if len(document) > MAX_SUPERVISOR_DOC_CHARS:
+            print(f"Supervisor: using first {MAX_SUPERVISOR_DOC_CHARS:,} chars (full doc {len(document):,})", file=sys.stderr)
         agent = build_supervisor(get_config())
-        result = agent.invoke({"messages": [HumanMessage(content=f"Extract attributes from this SEC filing:\n\n{document}")]})
+        result = agent.invoke({"messages": [HumanMessage(content=f"Extract attributes from this SEC filing:\n\n{doc_excerpt}")]})
         messages = result.get("messages", [])
         final_text = messages[-1].content if messages else ""
         output = {"supervisor_output": final_text}

@@ -28,6 +28,7 @@ from agent_server.sec_extraction.tools.enrichment import enrich_record
 from agent_server.sec_extraction.tools.evaluate import compute_fill_rate, evaluate_record
 from agent_server.sec_extraction.tools.llm_extract import llm_extract_record
 from agent_server.sec_extraction.tools.scraper import scrape_attributes
+from agent_server.sec_extraction.tools.section_filtering import filter_sections as filter_10k_sections_fn
 from agent_server.sec_extraction.tools.text_extraction import extract_text
 from agent_server.sec_extraction.tools.web_search import web_search
 
@@ -49,6 +50,12 @@ def regex_scrape(text: str) -> str:
     """Extract attributes using regex patterns. Returns JSON dict of found fields."""
     result = scrape_attributes(text)
     return json.dumps(result, indent=2)
+
+
+@tool
+def filter_10k_sections(raw_text: str) -> str:
+    """Extract only the 10-K document from an SEC submission and return important Item sections (e.g. Item 1, 1A, 2, 7) as plain text. Use this before regex_scrape or extract_with_llm when you have full submission text."""
+    return filter_10k_sections_fn(raw_text, verbose=True) or "(No 10-K sections found; use full text.)"
 
 
 @tool
@@ -107,7 +114,7 @@ def search_web(query: str) -> str:
 
 
 SUPERVISOR_TOOLS = [
-    clean_text, regex_scrape, vector_search,
+    clean_text, regex_scrape, filter_10k_sections, vector_search,
     extract_with_llm, enrich, evaluate, search_web,
 ]
 
@@ -117,12 +124,13 @@ Your job: extract structured business attributes from SEC filings.
 
 Strategy (follow this order):
 1. Call `clean_text` on the raw filing first.
-2. Call `regex_scrape` on the clean text for quick pattern matches.
-3. Call `vector_search` with the company name to get context from the filings database.
-4. Call `extract_with_llm` passing the clean text, scraper hints, and retrieved context.
-5. Call `enrich` to add derived fields (is_manufacturer, is_open).
-6. Call `evaluate` to check extraction quality.
-7. If fill_rate < 0.5, call `search_web` for missing info, then re-extract and re-evaluate.
+2. Optionally call `filter_10k_sections` on the raw text to get only 10-K Item sections (Item 1, 1A, 2, 7, etc.); use that for scraping and LLM when available.
+3. Call `regex_scrape` on the clean or filtered text for quick pattern matches.
+4. Call `vector_search` with the company name to get context from the filings database.
+5. Call `extract_with_llm` passing the filtered/clean text, scraper hints, and retrieved context.
+6. Call `enrich` to add derived fields (is_manufacturer, is_open).
+7. Call `evaluate` to check extraction quality.
+8. If fill_rate < 0.5, call `search_web` for missing info, then re-extract and re-evaluate.
 
 Return the final enriched BusinessRecord JSON as your answer.
 """

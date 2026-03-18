@@ -53,16 +53,29 @@ def compute_fill_rate(record_dict: dict) -> tuple[float, list[str], list[str]]:
     return rate, filled, missing
 
 
+def _llm_filled_fields(llm_record: dict | None) -> list[str]:
+    """List of attribute names that have a non-empty value in the LLM-only record."""
+    if not llm_record:
+        return []
+    return [
+        k for k, v in llm_record.items()
+        if v is not None and v != "" and v != []
+    ]
+
+
 def evaluate_record(
     record_dict: dict,
     source_text: str,
     config: ExtractionConfig,
+    llm_record: dict | None = None,
 ) -> dict:
     """Run LLM evaluation + fill rate on a BusinessRecord dict.
 
-    Returns an EvaluationResult dict.
+    If llm_record is provided (extraction from LLM before scraper fill),
+    the result includes llm_filled_fields and llm_record in the evaluation.
     """
     fill_rate, filled, missing = compute_fill_rate(record_dict)
+    llm_filled = _llm_filled_fields(llm_record) if llm_record else []
 
     llm_eval = {"valid": True, "confidence": fill_rate, "issues": []}
 
@@ -95,4 +108,6 @@ def evaluate_record(
         filled_fields=filled,
         missing_fields=missing,
         issues=llm_eval.get("issues", []),
+        llm_filled_fields=llm_filled,
+        llm_record=llm_record or {},
     ).model_dump()

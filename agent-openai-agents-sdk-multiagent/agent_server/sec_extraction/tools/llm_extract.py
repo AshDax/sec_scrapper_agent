@@ -3,13 +3,13 @@
 Uses a chat model (Databricks or Groq) with structured output to produce
 a full extraction record from the filing text + any scraper/retrieval context.
 
-The schema is loaded from attribute_registry (financial_datum_attributes.csv
-and place_attributes.csv).
+Only the first MAX_FILING_CHARS of the document are sent in a single LLM call
+to stay within the model's context limit (e.g. Groq 8K tokens).
 
 Usage:
     from agent_server.sec_extraction.tools.llm_extract import llm_extract_record
     from agent_server.sec_extraction.config import get_config
-    record_dict = llm_extract_record(clean_text, scraper_result, context_chunks, get_config())
+    record_dict, llm_record = llm_extract_record(clean_text, scraper_result, context_chunks, get_config())
 """
 
 from __future__ import annotations
@@ -27,6 +27,10 @@ if TYPE_CHECKING:
 from agent_server.sec_extraction.attribute_registry import get_registry
 
 logger = logging.getLogger(__name__)
+
+# Max characters to send in one request (fits within Groq 8K token context with system + hints).
+MAX_FILING_CHARS = 6_000
+MAX_HINTS_CHARS = 400
 
 SEC_EXTRACTABLE_ATTRS = [
     "company_name", "company_legal_name", "company_ein", "cik",
@@ -76,69 +80,63 @@ def llm_extract_record(
     scraper_result: dict,
     context_chunks: list[str],
     config: ExtractionConfig,
-) -> dict:
-    """Run LLM structured extraction and return a BusinessRecord dict.
+) -> tuple[dict, dict]:
+    """Run a single LLM extraction on up to MAX_FILING_CHARS of the document.
 
-    Args:
-        text:           Clean filing text.
-        scraper_result: Partial dict from the scraper step (merged as hints).
-        context_chunks: Supplementary text from Vector Search.
-        config:         Pipeline configuration.
-
-    Returns:
-        Dict matching BusinessRecord fields.
+    Returns (full_record, llm_record) where full_record is merged with scraper
+    and llm_record is what the LLM produced alone.
     """
-    llm = config.get_llm(temperature=0)
+    registry = get_registry()
+    valid_keys = set(registry.attribute_names)
+
+    filing_excerpt = (text or "")[:MAX_FILING_CHARS]
 
     context_block = ""
     if context_chunks:
-        joined = "\n---\n".join(c[:500] for c in context_chunks[:3])
-        context_block = f"\n\n[Context]\n{joined}"
+        joined = "\n---\n".join(c[:300] for c in context_chunks[:2])
+        context_block = f"\n\n[Context]\n{joined}"[:800]
 
     scraper_block = ""
     if scraper_result:
-        extractable = set(SEC_EXTRACTABLE_ATTRS)
-        relevant_hints = {k: v for k, v in scraper_result.items() if k in extractable}
+        relevant_hints = {k: v for k, v in scraper_result.items() if k in set(SEC_EXTRACTABLE_ATTRS)}
         if relevant_hints:
-            scraper_block = "\n\n[Hints]\n" + json.dumps(relevant_hints, separators=(",", ":"))
+            raw_hints = json.dumps(relevant_hints, separators=(",", ":"))
+            scraper_block = "\n\n[Hints]\n" + raw_hints[:MAX_HINTS_CHARS]
 
     user_content = (
-        f"[Filing]\n{text[:4000]}"
+        f"[Filing]\n{filing_excerpt}"
         f"{context_block}"
         f"{scraper_block}"
-        "\n\nExtract now."
+        "\n\nExtract all fields present. Use null for missing."
     )
 
+    llm_record: dict = {}
     try:
+        llm = config.get_llm(temperature=0)
         prompt = _build_system_prompt()
         response = llm.invoke([
             SystemMessage(content=prompt),
             HumanMessage(content=user_content),
         ])
-
         raw = response.content.strip()
-
-        # Strip markdown code fences if present
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
-
         parsed = json.loads(raw)
-
-        # Filter to only valid registry attributes
-        registry = get_registry()
-        valid_keys = set(registry.attribute_names)
-        record = {k: v for k, v in parsed.items() if k in valid_keys}
-
-        # Merge with scraper result for any fields we didn't get
-        for k, v in scraper_result.items():
-            if k in valid_keys and record.get(k) is None:
-                record[k] = v
-
-        return record
-
+        llm_record = {k: v for k, v in parsed.items() if k in valid_keys}
     except json.JSONDecodeError:
-        logger.warning("LLM returned non-JSON — falling back to scraper result")
-        return scraper_result
+        logger.warning("LLM returned non-JSON")
     except Exception as exc:
         logger.warning("LLM extraction failed: %s", exc)
-        return scraper_result
+
+    record = dict(llm_record)
+    for k, v in scraper_result.items():
+        if k in valid_keys and (record.get(k) is None or record.get(k) == "" or record.get(k) == []):
+            record[k] = v
+
+    logger.info(
+        "llm_extract: sent %d chars, got %d fields from LLM, %d total after scraper merge",
+        len(filing_excerpt),
+        sum(1 for v in llm_record.values() if v is not None and v != "" and v != []),
+        sum(1 for v in record.values() if v is not None and v != [] and v != ""),
+    )
+    return record, llm_record
